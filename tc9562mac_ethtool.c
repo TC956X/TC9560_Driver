@@ -4,7 +4,7 @@
  * tc9562mac_ethtool.c
  *
  * Copyright (C) 2007-2009 STMicroelectronics Ltd
- * Copyright (C) 2019 Toshiba Electronic Devices & Storage Corporation
+ * Copyright (C) 2020 Toshiba Electronic Devices & Storage Corporation
  *
  * This file has been derived from the STMicro Linux driver,
  * and developed or modified for TC9562.
@@ -25,6 +25,8 @@
  */
 
 /*! History:
+ *  26 Feb 2020 : Minor update.
+ *  VERSION     : 01-01
  *  30 Sep 2019 : Base lined
  *  VERSION     : 01-00
  */
@@ -41,8 +43,8 @@
 #include "dwmac_dma.h"
 
 #define REG_SPACE_SIZE	0x1060
-#define MAC100_ETHTOOL_NAME	"st_mac100"
-#define GMAC_ETHTOOL_NAME	"st_gmac"
+#define MAC100_ETHTOOL_NAME	"tc9562_mac100"
+#define GMAC_ETHTOOL_NAME	"tc9562_gmac"
 
 #define ETHTOOL_DMA_OFFSET	55
 

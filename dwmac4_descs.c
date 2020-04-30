@@ -4,7 +4,7 @@
  * dwmac4_descs.c
  *
  * Copyright (C) 2015 STMicroelectronics Ltd
- * Copyright (C) 2019 Toshiba Electronic Devices & Storage Corporation
+ * Copyright (C) 2020 Toshiba Electronic Devices & Storage Corporation
  *
  * This file has been derived from the STMicro Linux driver,
  * and developed or modified for TC9562.
@@ -25,6 +25,8 @@
  */
 
 /*! History:
+ *  26 Feb 2020 : Minor update.
+ *  VERSION     : 01-01
  *  30 Sep 2019 : Base lined
  *  VERSION     : 01-00
  */
@@ -475,7 +477,8 @@ void dwmac4_rd_prepare_tso_tx_desc(struct dma_desc *p, int is_fs,
 void dwmac4_release_tx_desc(struct dma_desc *p, int mode)
 {
 	DBGPR_FUNC("-->dwmac4_release_tx_desc\n");
-
+	p->des0 = 0; 
+	p->des1 = 0; 
 	p->des2 = 0;
 	p->des3 = 0;
 

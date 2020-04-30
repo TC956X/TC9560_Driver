@@ -4,7 +4,7 @@
  * dwmac5.c
  *
  * Copyright (C) 2017 Synopsys, Inc. and/or its affiliates.
- * Copyright (C) 2019 Toshiba Electronic Devices & Storage Corporation
+ * Copyright (C) 2020 Toshiba Electronic Devices & Storage Corporation
  *
  * This file has been derived from the STMicro and Synopsys Linux driver,
  * and developed or modified for TC9562.
@@ -25,6 +25,9 @@
  */
 
 /*! History:
+ *  26 Feb 2020 : 1. Added TC - FRP feature support.
+                  2. Modified FRP feature to support continues table entries.                
+ *  VERSION     : 01-01
  *  30 Sep 2019 : Base lined
  *  VERSION     : 01-00
  */
@@ -720,6 +723,242 @@ void dwmac5_safety_feat_set(struct net_device *ndev, struct mac_device_info *hw,
 }
 #endif /* TC9562_UNSUPPORTED_UNTESTED_FEATURE */
 
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(4,19,15))
+
+static int dwmac5_rxp_disable(void __iomem *ioaddr)
+{
+	u32 val;
+	int ret;
+
+	val = readl(ioaddr + MTL_OPERATION_MODE);
+	val &= ~MTL_FRPE;
+	writel(val, ioaddr + MTL_OPERATION_MODE);
+
+	ret = readl_poll_timeout(ioaddr + MTL_RXP_CONTROL_STATUS, val,
+			val & RXPI, 1, 10000);
+	if (ret)
+		return ret;
+	return 0;
+}
+
+static void dwmac5_rxp_enable(void __iomem *ioaddr)
+{
+	u32 val;
+
+	val = readl(ioaddr + MTL_OPERATION_MODE);
+	val |= MTL_FRPE;
+	writel(val, ioaddr + MTL_OPERATION_MODE);
+}
+
+static int dwmac5_rxp_update_single_entry(void __iomem *ioaddr,
+					  struct tc9562mac_tc_entry *entry,
+					  int pos)
+{
+	int ret, i;
+
+	for (i = 0; i < (sizeof(entry->val) / sizeof(u32)); i++) {
+		int real_pos = pos * (sizeof(entry->val) / sizeof(u32)) + i;
+		u32 val;
+
+		/* Wait for ready */
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 0, 0))
+		ret = readl_poll_timeout(ioaddr + MTL_RXP_IACC_CTRL_STATUS,
+				val, !(val & STARTBUSY), 1, 10000);
+		if (ret)
+			return ret;
+#else
+        {
+            int limit = 10000;
+            while (limit--) {
+                if (!(readl(ioaddr + MTL_RXP_IACC_CTRL_STATUS) & STARTBUSY))
+                    break;
+                udelay(1);
+            }
+
+            if (limit < 0)
+                return -EBUSY;
+        }
+#endif
+
+		/* Write data */
+		val = *((u32 *)&entry->val + i);
+		//printk("FRP data: %x", val);
+		writel(val, ioaddr + MTL_RXP_IACC_DATA);
+		/* Write pos */
+		val = real_pos & ADDR;
+		//printk("Addr FRP: %x \n", val);
+		writel(val, ioaddr + MTL_RXP_IACC_CTRL_STATUS);
+
+		/* Write OP */
+		val |= WRRDN;
+		writel(val, ioaddr + MTL_RXP_IACC_CTRL_STATUS);
+
+		/* Start Write */
+		val |= STARTBUSY;
+		writel(val, ioaddr + MTL_RXP_IACC_CTRL_STATUS);
+
+			
+		/* Wait for ready */
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 0, 0))
+		ret = readl_poll_timeout(ioaddr + MTL_RXP_IACC_CTRL_STATUS,
+				val, !(val & STARTBUSY), 1, 10000);
+		if (ret)
+			return ret;
+#else
+        {
+            int limit = 10000;
+            while (limit--) {
+                if (!(readl(ioaddr + MTL_RXP_IACC_CTRL_STATUS) & STARTBUSY))
+                    break;
+                udelay(1);
+            }
+
+            if (limit < 0)
+                return -EBUSY;
+        }
+#endif
+	}
+
+	return 0;
+}
+
+static struct tc9562mac_tc_entry *
+dwmac5_rxp_get_next_entry(struct tc9562mac_tc_entry *entries, unsigned int count,
+			  u32 curr_prio)
+{
+	struct tc9562mac_tc_entry *entry;
+	u32 min_prio = ~0x0;
+	int i, min_prio_idx;
+	bool found = false;
+
+	for (i = count - 1; i >= 0; i--) {
+		entry = &entries[i];
+
+		/* Do not update unused entries */
+		if (!entry->in_use)
+			continue;
+		/* Do not update already updated entries (i.e. fragments) */
+		if (entry->in_hw)
+			continue;
+		/* Let last entry be updated last */
+		if (entry->is_last)
+			continue;
+		/* Do not return fragments */
+		if (entry->is_frag)
+			continue;
+		/* Check if we already checked this prio */
+		if (entry->prio < curr_prio)
+			continue;
+		/* Check if this is the minimum prio */
+		if (entry->prio < min_prio) {
+			min_prio = entry->prio;
+			min_prio_idx = i;
+			found = true;
+		}
+	}
+
+	if (found)
+		return &entries[min_prio_idx];
+	return NULL;
+}
+
+int dwmac5_rxp_config(void *p, void *ent,
+		      unsigned int count)
+{
+
+	struct tc9562mac_priv *priv = (struct tc9562mac_priv *)p;
+	struct tc9562mac_tc_entry *entries = (struct tc9562mac_tc_entry *)ent;
+	struct tc9562mac_tc_entry *entry, *frag;
+	int i, ret, nve = 0;
+	u32 curr_prio = 0;
+	u32 old_val, val;
+	void __iomem *ioaddr = priv->hw->pcsr;
+
+	/* Force disable RX */
+	old_val = readl(ioaddr + GMAC_CONFIG);
+	val = old_val & ~GMAC_CONFIG_RE;
+	writel(val, ioaddr + GMAC_CONFIG);
+
+	/* Disable RX Parser */
+	ret = dwmac5_rxp_disable(ioaddr);
+	if (ret)
+		goto re_enable;
+
+	/* Set all entries as NOT in HW */
+	for (i = 0; i < count; i++) {
+		entry = &entries[i];
+		entry->in_hw = false;
+	}
+
+	/* Update entries by reverse order */
+	while (1) {
+		entry = dwmac5_rxp_get_next_entry(entries, count, curr_prio);
+		if (!entry)
+			break;
+
+		curr_prio = entry->prio;
+		frag = entry->frag_ptr;
+
+		/* Set special fragment requirements */
+		if (frag) {
+			entry->val.af = 0;
+			entry->val.rf = 0;
+			entry->val.nc = 1;
+			entry->val.ok_index = nve + 2;
+		}
+
+		if((!entry->val.rf) && (!entry->val.af)) //To handle continue
+		{
+			entry->val.nc = 1;
+			entry->val.ok_index = nve + 1;//continue to next
+		}	
+	
+		ret = dwmac5_rxp_update_single_entry(ioaddr, entry, nve);
+		if (ret)
+			goto re_enable;
+
+		entry->table_pos = nve++;
+		entry->in_hw = true;
+
+		if (frag && !frag->in_hw) {
+			ret = dwmac5_rxp_update_single_entry(ioaddr, frag, nve);
+			if (ret)
+				goto re_enable;
+			frag->table_pos = nve++;
+			frag->in_hw = true;
+		}
+	}
+
+	if (!nve)
+		goto re_enable;
+
+	/* Update all pass entry */
+	for (i = 0; i < count; i++) {
+		entry = &entries[i];
+		if (!entry->is_last)
+			continue;
+
+		ret = dwmac5_rxp_update_single_entry(ioaddr, entry, nve);
+		if (ret)
+			goto re_enable;
+
+		entry->table_pos = nve++;
+	}
+
+	/* Assume n. of parsable entries == n. of valid entries */
+	val = (nve << 16) & NPE;
+	val |= nve & NVE;
+	writel(val, ioaddr + MTL_RXP_CONTROL_STATUS);
+
+	/* Enable RX Parser */
+	dwmac5_rxp_enable(ioaddr);
+
+re_enable:
+	/* Re-enable RX */
+	writel(old_val, ioaddr + GMAC_CONFIG);
+	return ret;
+}
+#endif
 static int dwmac5_rx_parser_write_entry(struct mac_device_info *hw,
 		struct tc9562mac_rx_parser_entry *entry, int entry_pos)
 {

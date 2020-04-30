@@ -4,7 +4,7 @@
  * tc9562mac_main.c
  *
  * Copyright (C) 2007-2011 STMicroelectronics Ltd
- * Copyright (C) 2019 Toshiba Electronic Devices & Storage Corporation
+ * Copyright (C) 2020 Toshiba Electronic Devices & Storage Corporation
  *
  * This file has been derived from the STMicro Linux driver,
  * and developed or modified for TC9562.
@@ -25,6 +25,13 @@
  */
 
 /*! History:
+ *  26 Feb 2020 : 1. Added Suspend/Resume fix.
+                  2. BCM Driver update for NTN2.
+                  3. Added Unified Firmware feature.
+                  4. Added SGMII Interface support.
+                  5. Added 4.19 kernel support.
+                  6. Added TC - CBS and launch time feature support.
+ *  VERSION     : 01-001
  *  30 Sep 2019 : Base lined
  *  VERSION     : 01-00
  */
@@ -71,6 +78,9 @@
 #include <linux/mdio.h>
 #endif
 
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(4,19,15))
+#include <net/pkt_cls.h>
+#endif
 #define TC9562_MSIGEN_VERIFICATION
 //#define ENABLE_EST
 #define TEMP_SG_4TSO
@@ -229,9 +239,7 @@ static void tc9562mac_disable_all_queues(struct tc9562mac_priv *priv)
 	for (queue = 0; queue < napi_queues_cnt; queue++) {
 		struct tc9562mac_rx_queue *rx_q = &priv->rx_queue[queue];
 
-        if (!test_bit(NAPI_STATE_SCHED, &rx_q->napi.state)) {
-		    napi_disable(&rx_q->napi);
-	    }
+	    napi_disable(&rx_q->napi);
 	}
 	
 	DBGPR_FUNC("<--tc9562mac_disable_all_queues\n");
@@ -251,9 +259,7 @@ static void tc9562mac_enable_all_queues(struct tc9562mac_priv *priv)
 	for (queue = 0; queue < napi_queues_cnt; queue++) {
 		struct tc9562mac_rx_queue *rx_q = &priv->rx_queue[queue];
 
-        if (test_bit(NAPI_STATE_SCHED, &rx_q->napi.state)) {
-			napi_enable(&rx_q->napi);
-		}
+		napi_enable(&rx_q->napi);
 	}
 	
 	DBGPR_FUNC("<--tc9562mac_enable_all_queues\n");
@@ -302,18 +308,28 @@ static void tc9562mac_reset_queues_param(struct tc9562mac_priv *priv)
 	u32 rx_cnt = priv->plat->rx_queues_to_use + 1;
 	u32 tx_cnt = priv->plat->tx_queues_to_use;
 	u32 queue;
+	struct tc9562mac_rx_queue *rx_q;
+	struct tc9562mac_tx_queue *tx_q;
 
 	DBGPR_FUNC("-->tc9562mac_reset_queues_param\n");
 
 	for (queue = 0; queue < rx_cnt; queue++) {
-		struct tc9562mac_rx_queue *rx_q = &priv->rx_queue[queue];
+#ifdef UNIFIED_DRIVER
+		if(priv->plat->rx_dma_ch_for_host[queue] != 0)    
+			continue;
+#endif
+        rx_q = &priv->rx_queue[queue];
 
 		rx_q->cur_rx = 0;
 		rx_q->dirty_rx = 0;
 	}
 
 	for (queue = 0; queue < tx_cnt; queue++) {
-		struct tc9562mac_tx_queue *tx_q = &priv->tx_queue[queue];
+#ifdef UNIFIED_DRIVER
+		if(priv->plat->tx_dma_ch_for_host[queue] == 0)
+			continue;
+#endif
+        tx_q = &priv->tx_queue[queue];
 
 		tx_q->cur_tx = 0;
 		tx_q->dirty_tx = 0;
@@ -455,12 +471,17 @@ static void tc9562mac_enable_eee_mode(struct tc9562mac_priv *priv)
 {
 	u32 tx_cnt = priv->plat->tx_queues_to_use;
 	u32 queue;
+	struct tc9562mac_tx_queue *tx_q;
 
 	DBGPR_FUNC("-->tc9562mac_enable_eee_mode\n");
 
 	/* check if all TX queues have the work finished */
 	for (queue = 0; queue < tx_cnt; queue++) {
-		struct tc9562mac_tx_queue *tx_q = &priv->tx_queue[queue];
+#ifdef UNIFIED_DRIVER
+		if(priv->plat->tx_dma_ch_for_host[queue] == 0)
+			continue;
+#endif
+		tx_q = &priv->tx_queue[queue];
 
 		if (tx_q->dirty_tx != tx_q->cur_tx)
 			return; /* still unfinished work */
@@ -498,6 +519,19 @@ void tc9562mac_disable_eee_mode(struct tc9562mac_priv *priv)
  *  if there is no data transfer and if we are not in LPI state,
  *  then MAC Transmitter can be moved to LPI state.
  */
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(4,19,10))
+static void tc9562mac_eee_ctrl_timer(struct timer_list *t)
+{
+	struct tc9562mac_priv *priv = from_timer(priv, t, eee_ctrl_timer);
+
+	DBGPR_FUNC("-->tc9562mac_eee_ctrl_timer\n");
+
+	tc9562mac_enable_eee_mode(priv);
+	mod_timer(&priv->eee_ctrl_timer, TC9562MAC_LPI_T(eee_timer));
+
+	DBGPR_FUNC("<--tc9562mac_eee_ctrl_timer\n");
+}
+#else
 static void tc9562mac_eee_ctrl_timer(unsigned long arg)
 {
 	struct tc9562mac_priv *priv = (struct tc9562mac_priv *)arg;
@@ -509,6 +543,7 @@ static void tc9562mac_eee_ctrl_timer(unsigned long arg)
 
 	DBGPR_FUNC("<--tc9562mac_eee_ctrl_timer\n");
 }
+#endif
 
 /**
  * tc9562mac_eee_init - init EEE
@@ -573,9 +608,15 @@ bool tc9562mac_eee_init(struct tc9562mac_priv *priv)
 		spin_lock_irqsave(&priv->lock, flags);
 		if (!priv->eee_active) {
 			priv->eee_active = 1;
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(4,19,10))
+			timer_setup(&priv->eee_ctrl_timer,
+				    tc9562mac_eee_ctrl_timer,
+				    0);
+#else
 			setup_timer(&priv->eee_ctrl_timer,
 				    tc9562mac_eee_ctrl_timer,
 				    (unsigned long)priv);
+#endif
 			mod_timer(&priv->eee_ctrl_timer,
 				  TC9562MAC_LPI_T(eee_timer));
 
@@ -793,6 +834,169 @@ count++;
 }
 
 
+#ifdef UNIFIED_DRIVER
+void tc9562_propagate_link_params(struct net_device *dev)
+{
+    struct tc9562mac_priv *priv = netdev_priv(dev);
+    struct phy_device *phydev = dev->phydev;
+    
+    priv->link_param.link_state = phydev->link;
+    
+    if (phydev->speed == SPEED_1000)
+    {
+        priv->link_param.link_speed = 3;
+    }
+    else if (phydev->speed == SPEED_100)
+    {
+        priv->link_param.link_speed = 2;
+    }
+    else
+    {
+        priv->link_param.link_speed = 0;
+    }
+    
+#ifdef UNIFIED_DRIVER_TEST_DBG1
+    if (priv->link_param.link_state)
+    {
+        DBGPR_UNIFIED_1("Host Link, Speed = %dMbps, State = Up.\n", phydev->speed);
+    }
+    else
+    {
+        DBGPR_UNIFIED_1("Host Link, Speed = NA, State = Down.\n");
+    }
+#endif
+
+#ifdef DEBUG_UNIFIED	
+    NMSGPR_ALERT("Propagating Updated Link Params to CM3.\n");
+#endif    
+
+    /* Copy Link data to Shared Memory Region */
+    memcpy((uint8_t *)(priv->tc9562_SRAM_pci_base_addr + HOST_SHARED_MEM_OFFSET + sizeof(priv->tdm_init_config)), (uint8_t *)&priv->link_param, sizeof(priv->link_param)); 
+    
+    /* Raise MCU Flag to CM3 for propogating the Updated Link Parameters */
+    
+    writel(1 << 9, priv->ioaddr + 0x8054);  /*MCU_FLAG:9 - LINK STATUS*/
+}
+
+int tc9562_ioctl_tdm_start(struct tc9562mac_priv *priv, void __user *data)
+{
+	struct tc9562mac_ioctl_tdm_config tdm_config;
+	
+	
+#ifdef DEBUG_UNIFIED	
+    NMSGPR_ALERT("TDM Start IOCTL Handler\n");
+#endif
+    /* Copy Config data to Shared Memory Region */
+    
+
+    if(data != NULL)
+    {
+        if(copy_from_user(&tdm_config, data, sizeof(tdm_config)))
+            return -1;
+        memcpy((uint8_t *)&priv->tdm_init_config, (uint8_t *)&tdm_config.tdm_init_config, sizeof(tdm_config.tdm_init_config));
+        priv->tdm_init_config.config = 1;
+        priv->tdm_start = 1;
+    }
+    else
+    {
+#ifdef DEBUG_UNIFIED
+        NMSGPR_ALERT("NULL Pointer in TDM START.\n");
+#endif
+    }
+    
+    {
+        int k, l;
+
+        NMSGPR_ALERT("Host TDM Config : \n");
+        NMSGPR_ALERT("-----------------\n");
+        NMSGPR_ALERT("config : %d\n", priv->tdm_init_config.config);    
+        NMSGPR_ALERT("samp_freq : %d\n", priv->tdm_init_config.samp_freq);    
+        NMSGPR_ALERT("op_mode : %d\n", priv->tdm_init_config.op_mode);    
+        NMSGPR_ALERT("mcr_mode : %d\n\n", priv->tdm_init_config.mcr_mode);    
+    
+        NMSGPR_ALERT("\nIN : \n");
+    
+        for(l = 0; l < 4; l++)
+        {
+            NMSGPR_ALERT("samp_size        : %d\n", priv->tdm_init_config.in_conf[l].samp_size);    
+            NMSGPR_ALERT("num_ch           : %d\n", priv->tdm_init_config.in_conf[l].num_ch);
+            NMSGPR_ALERT("stream_id        : ");    
+            for(k = 0; k < 8; k++)
+            {
+                NMSGPR_ALERT(KERN_CONT "%02x:", priv->tdm_init_config.in_conf[l].stream_id[k]);
+            }
+            NMSGPR_ALERT("\n");
+            NMSGPR_ALERT("dst_mac_address  : " );    
+            for(k = 0; k < 6; k++)
+            {
+                NMSGPR_ALERT(KERN_CONT "%02x:", priv->tdm_init_config.in_conf[l].dst_mac_address[k]);
+            }
+            NMSGPR_ALERT("\n");
+            NMSGPR_ALERT("vlan_id          : %3hhx\n\n", priv->tdm_init_config.in_conf[l].vlan_id);
+       }
+       
+        NMSGPR_ALERT("\nOUT: \n");
+        NMSGPR_ALERT("samp_size : %d\n", priv->tdm_init_config.out_conf.samp_size);
+        NMSGPR_ALERT("num_ch : %d\n", priv->tdm_init_config.out_conf.num_ch);
+        NMSGPR_ALERT("stream_id        : ");    
+        for(k = 0; k < 8; k++)
+        {
+            NMSGPR_ALERT(KERN_CONT "%02x:", priv->tdm_init_config.out_conf.stream_id[k]);
+        }
+        NMSGPR_ALERT("\n\n");
+
+    
+        NMSGPR_ALERT("crf_op_mode : %d\n", priv->tdm_init_config.crf_conf.crf_op_mode);
+        NMSGPR_ALERT("stream_id        : ");    
+        for(k = 0; k < 8; k++)
+        {
+            NMSGPR_ALERT(KERN_CONT "%02x:", priv->tdm_init_config.crf_conf.crf_stream_id[k]);
+        }
+        NMSGPR_ALERT("\n");
+        NMSGPR_ALERT("dst_mac_address  : " );    
+        for(k = 0; k < 6; k++)
+        {
+            NMSGPR_ALERT(KERN_CONT "%02x:", priv->tdm_init_config.crf_conf.crf_dst_mac_address[k]);
+        }
+        NMSGPR_ALERT("\n");
+        
+     }
+    memcpy((uint8_t *)(priv->tc9562_SRAM_pci_base_addr + HOST_SHARED_MEM_OFFSET), (uint8_t *)&priv->tdm_init_config, sizeof(priv->tdm_init_config)); 
+
+
+	/* Raise MCU Flag to CM3 for TDM Start */
+    writel(1 << 11, priv->ioaddr + 0x8054);  /*MCU_FLAG:11 - TDM START*/
+
+    DBGPR_FUNC("-->tc9562mac_ioctl_TDM_Start\n");
+    
+    return 0;
+}
+
+int tc9562_ioctl_tdm_stop(struct tc9562mac_priv *priv, void __user *data)
+{	
+#ifdef DEBUG_UNIFIED	
+	NMSGPR_ALERT("TDM Stop IOCTL Handler\n");
+#endif
+
+    priv->tdm_init_config.config = 1;         
+    priv->tdm_start = 0;
+
+    priv->tdm_init_config.config = 0;         //For internal Start Stop Call 
+
+    memcpy((uint8_t *)(priv->tc9562_SRAM_pci_base_addr + HOST_SHARED_MEM_OFFSET), (uint8_t *)&priv->tdm_init_config, sizeof(priv->tdm_init_config));
+    
+    
+    /* Raise MCU Flag to CM3 for TDM Stop */
+	writel(1 << 10, priv->ioaddr + 0x8054);  /*MCU_FLAG:10 - TDM STOP*/
+
+	DBGPR_FUNC("-->tc9562mac_extension_ioctl\n");
+    
+    return 0;
+}
+#endif
+
+
+
 #define AVB_PKT_RATE_DBG
 #if defined(TX_LOGGING_TRACE)		
 static void tc9562mac_get_etx_hwtstamp(struct tc9562mac_priv *priv,
@@ -858,6 +1062,7 @@ count++;
 		shhwtstamp.hwtstamp = ns_to_ktime(ns);
 
 		netdev_dbg(priv->dev, "get valid TX hw timestamp %llu\n", ns);
+		//printk("get valid TX hw timestamp %lld\n", ns);
 		/* pass tstamp to stack */
 		skb_tstamp_tx(skb, &shhwtstamp);
 #ifdef FPE
@@ -1404,7 +1609,12 @@ static void tc9562_reload_cbs(struct tc9562mac_priv *priv)
 /* queue 0 is reserved for legacy traffic */
 //	for (queue = 0; queue < tx_queues_count; queue++) {
     for (queue = 1; queue < tx_queues_count; queue++) {
+#ifndef UNIFIED_DRIVER
 		if ((priv->plat->tx_queues_cfg[queue].mode_to_use == MTL_QUEUE_AVB) && (priv->cbs_cfg_status[queue] == 1)) {
+#else
+		if ((priv->plat->tx_queues_cfg[queue].mode_to_use == MTL_QUEUE_AVB) && (priv->cbs_cfg_status[queue] == 1) &&
+			(priv->plat->tx_dma_ch_for_host[queue] == 1)) {
+#endif
 		
 		    if(priv->speed == SPEED_100) {
 		        priv->plat->tx_queues_cfg[queue].send_slope = priv->cbs_speed100_cfg[queue].send_slope;
@@ -1510,11 +1720,36 @@ static void tc9562mac_adjust_link(struct net_device *dev)
 			new_state = true;
 			priv->oldlink = true;
 		}
+		
+#ifdef UNIFIED_DRIVER
+		if(new_state)
+		{	
+            tc9562_propagate_link_params(dev);
+            if (priv->tdm_start == 1)
+            {
+                void __user *data = NULL;
+                tc9562_ioctl_tdm_start(priv, data);    
+            }
+        }
+#endif
+		
 	} else if (priv->oldlink) {
 		new_state = true;
 		priv->oldlink = false;
 		priv->speed = SPEED_UNKNOWN;
 		priv->oldduplex = DUPLEX_UNKNOWN;
+	#ifdef UNIFIED_DRIVER
+		if(new_state)
+		{
+            tc9562_propagate_link_params(dev);
+            if (priv->tdm_start == 1)
+            {
+                void __user *data = NULL;
+                tc9562_ioctl_tdm_stop(priv, data);
+                priv->tdm_start = 1;
+            }
+        }
+      #endif
 	}
 
 	if (new_state && netif_msg_link(priv))
@@ -1681,12 +1916,17 @@ static void tc9562mac_display_rx_rings(struct tc9562mac_priv *priv)
 	u32 rx_cnt = priv->plat->rx_queues_to_use + 1;
 	void *head_rx;
 	u32 queue;
+	struct tc9562mac_rx_queue *rx_q;
 
 	DBGPR_FUNC("-->tc9562mac_display_rx_rings\n");
 
 	/* Display RX rings */
 	for (queue = 0; queue < rx_cnt; queue++) {
-		struct tc9562mac_rx_queue *rx_q = &priv->rx_queue[queue];
+#ifdef UNIFIED_DRIVER
+		if(priv->plat->rx_dma_ch_for_host[queue] == 0)
+			continue;
+#endif
+		rx_q = &priv->rx_queue[queue];
 
 		pr_info("\tRX Queue %u rings\n", queue);
 
@@ -1707,12 +1947,17 @@ static void tc9562mac_display_tx_rings(struct tc9562mac_priv *priv)
 	u32 tx_cnt = priv->plat->tx_queues_to_use;
 	void *head_tx;
 	u32 queue;
+	struct tc9562mac_tx_queue *tx_q;
 
 	DBGPR_FUNC("-->tc9562mac_display_tx_rings\n");
 
 	/* Display TX rings */
 	for (queue = 0; queue < tx_cnt; queue++) {
-		struct tc9562mac_tx_queue *tx_q = &priv->tx_queue[queue];
+#ifdef UNIFIED_DRIVER
+		if(priv->plat->tx_dma_ch_for_host[queue] == 0)
+			continue;
+#endif
+		tx_q = &priv->tx_queue[queue];
 
 		pr_info("\tTX Queue %d rings\n", queue);
 
@@ -1848,12 +2093,22 @@ static void tc9562mac_clear_descriptors(struct tc9562mac_priv *priv)
 
 	/* Clear the RX descriptors */
 	for (queue = 0; queue < rx_queue_cnt; queue++)
+	{
+#ifdef UNIFIED_DRIVER
+		if(priv->plat->rx_dma_ch_for_host[queue] == 0)
+			continue;
+#endif
 		tc9562mac_clear_rx_descriptors(priv, queue);
-
+	}
 	/* Clear the TX descriptors */
 	for (queue = 0; queue < tx_queue_cnt; queue++)
+	{
+#ifdef UNIFIED_DRIVER
+		if(priv->plat->tx_dma_ch_for_host[queue] == 0)
+			continue;
+#endif
 		tc9562mac_clear_tx_descriptors(priv, queue);
-
+	}
 	DBGPR_FUNC("<--tc9562mac_clear_descriptors\n");
 }
 
@@ -1984,6 +2239,7 @@ static int init_dma_rx_desc_rings(struct net_device *dev, gfp_t flags)
 	int ret = -ENOMEM;
 	int queue;
 	int i;
+	struct tc9562mac_rx_queue *rx_q;
 	
 	DBGPR_FUNC("-->init_dma_rx_desc_rings\n");
 
@@ -2001,7 +2257,11 @@ static int init_dma_rx_desc_rings(struct net_device *dev, gfp_t flags)
 		  "SKB addresses:\nskb\t\tskb data\tdma data\n");
 
 	for (queue = 0; queue < rx_count; queue++) {
-		struct tc9562mac_rx_queue *rx_q = &priv->rx_queue[queue];
+#ifdef UNIFIED_DRIVER
+		if(priv->plat->rx_dma_ch_for_host[queue] == 0)
+			continue;
+#endif
+		rx_q = &priv->rx_queue[queue];
 
 		netif_dbg(priv, probe, priv->dev,
 			  "(%s) dma_rx_phy=0x%08x\n", __func__,
@@ -2077,11 +2337,16 @@ static int init_dma_tx_desc_rings(struct net_device *dev)
 	u32 tx_queue_cnt = priv->plat->tx_queues_to_use;
 	u32 queue;
 	int i;
+	struct tc9562mac_tx_queue *tx_q;
 
 	DBGPR_FUNC("-->init_dma_tx_desc_rings\n");
 
 	for (queue = 0; queue < tx_queue_cnt; queue++) {
-		struct tc9562mac_tx_queue *tx_q = &priv->tx_queue[queue];
+#ifdef UNIFIED_DRIVER
+		if(priv->plat->tx_dma_ch_for_host[queue] == 0)
+			continue;
+#endif
+		tx_q = &priv->tx_queue[queue];
 
 		netif_dbg(priv, probe, priv->dev,
 			  "(%s) dma_tx_phy=0x%08x\n", __func__,
@@ -2235,12 +2500,17 @@ static void free_dma_rx_desc_resources(struct tc9562mac_priv *priv)
 {
 	u32 rx_count = priv->plat->rx_queues_to_use + 1;
 	u32 queue;
+	struct tc9562mac_rx_queue *rx_q;
 	
 	DBGPR_FUNC("-->free_dma_rx_desc_resources\n");
 
 	/* Free RX queue resources */
 	for (queue = 0; queue < rx_count; queue++) {
-		struct tc9562mac_rx_queue *rx_q = &priv->rx_queue[queue];
+#ifdef UNIFIED_DRIVER
+		if(priv->plat->rx_dma_ch_for_host[queue] == 0) 
+			continue;
+#endif
+		rx_q = &priv->rx_queue[queue];
 
 		/* Release the DMA RX socket buffers */
 		dma_free_rx_skbufs(priv, queue);
@@ -2270,12 +2540,17 @@ static void free_dma_tx_desc_resources(struct tc9562mac_priv *priv)
 {
 	u32 tx_count = priv->plat->tx_queues_to_use;
 	u32 queue;
+	struct tc9562mac_tx_queue *tx_q;
 	
 	DBGPR_FUNC("-->free_dma_tx_desc_resources\n");
 
 	/* Free TX queue resources */
 	for (queue = 0; queue < tx_count; queue++) {
-		struct tc9562mac_tx_queue *tx_q = &priv->tx_queue[queue];
+#ifdef UNIFIED_DRIVER
+		if(priv->plat->tx_dma_ch_for_host[queue] == 0)
+			continue;
+#endif
+		tx_q = &priv->tx_queue[queue];
 
 		/* Release the DMA TX socket buffers */
 		dma_free_tx_skbufs(priv, queue);
@@ -2327,6 +2602,13 @@ static int alloc_dma_rx_desc_resources(struct tc9562mac_priv *priv)
 
 		rx_q->queue_index = queue;
 		rx_q->priv_data = priv;
+
+#ifdef UNIFIED_DRIVER
+	/* napi channel 3 is used for Tx interrupt handling. So initialize only queue_index and 
+	priv_data and skip rest of the allocation for Rx channel 3 */
+		if(priv->plat->rx_dma_ch_for_host[queue] == 0)
+			continue;
+#endif
 	/* napi channel 6 is used for Tx interrupt handling. So initialize only queue_index and 
 	priv_data and skip rest of the allocation for Rx channel 6 */
         if(queue == 5) continue;
@@ -2387,12 +2669,17 @@ static int alloc_dma_tx_desc_resources(struct tc9562mac_priv *priv)
 	u32 tx_count = priv->plat->tx_queues_to_use;
 	int ret = -ENOMEM;
 	u32 queue;
+	struct tc9562mac_tx_queue *tx_q;
 
 	DBGPR_FUNC("-->alloc_dma_tx_desc_resources\n");
 
 	/* TX queues buffers and DMA */
 	for (queue = 0; queue < tx_count; queue++) {
-		struct tc9562mac_tx_queue *tx_q = &priv->tx_queue[queue];
+#ifdef UNIFIED_DRIVER
+		if(priv->plat->tx_dma_ch_for_host[queue] == 0)
+			continue;
+#endif
+        tx_q = &priv->tx_queue[queue];
 
 		tx_q->queue_index = queue;
 		tx_q->priv_data = priv;
@@ -2602,10 +2889,22 @@ static void tc9562mac_start_all_dma(struct tc9562mac_priv *priv)
 	DBGPR_FUNC("-->tc9562mac_start_all_dma\n");
 
 	for (chan = 0; chan < rx_channels_count; chan++)
+	{
+#ifdef UNIFIED_DRIVER
+		if(priv->plat->rx_dma_ch_for_host[chan] == 0)
+			continue;
+#endif
 		tc9562mac_start_rx_dma(priv, chan);
+	}
 
 	for (chan = 0; chan < tx_channels_count; chan++)
+	{
+#ifdef UNIFIED_DRIVER
+		if(priv->plat->tx_dma_ch_for_host[chan] == 0)
+			continue;
+#endif
 		tc9562mac_start_tx_dma(priv, chan);
+	}
 
 	DBGPR_FUNC("<--tc9562mac_start_all_dma\n");
 }
@@ -2625,10 +2924,22 @@ static void tc9562mac_stop_all_dma(struct tc9562mac_priv *priv)
 	DBGPR_FUNC("-->tc9562mac_stop_all_dma\n");
 
 	for (chan = 0; chan < rx_channels_count; chan++)
+	{
+#ifdef UNIFIED_DRIVER
+		if(priv->plat->rx_dma_ch_for_host[chan] == 0)
+			continue;
+#endif
 		tc9562mac_stop_rx_dma(priv, chan);
+	}
 
 	for (chan = 0; chan < tx_channels_count; chan++)
+	{
+#ifdef UNIFIED_DRIVER
+	if(priv->plat->tx_dma_ch_for_host[chan] == 0)
+		continue;
+#endif
 		tc9562mac_stop_tx_dma(priv, chan);
+	}
 
 	DBGPR_FUNC("<--tc9562mac_stop_all_dma\n");
 }
@@ -2707,6 +3018,7 @@ static void tc9562mac_dma_operation_mode(struct tc9562mac_priv *priv)
 
 		for (chan = 0; chan < tx_channels_count; chan++) {
 #ifdef TC9562_DEFINED
+#ifndef UNIFIED_DRIVER
 			switch (chan) {
 			case 0: /* 1536 *2 = 3072  B*/
 				txfifosz = 3072;
@@ -2727,6 +3039,29 @@ static void tc9562mac_dma_operation_mode(struct tc9562mac_priv *priv)
 				txfifosz = 3072;
 				break;
 			}
+#else
+			switch (chan) {
+			case 0: 
+				txfifosz = 3072;
+				break;
+			case 1: 
+				txfifosz = 2048;
+				break;
+			case 2: 
+				txfifosz = 1024;
+				break;
+			case 3: 
+				txfifosz = 3072;
+				break;
+			case 4: 
+				txfifosz = 3072;
+				break;
+			case 5: 
+				txfifosz = 3072;
+				break;
+			}
+
+#endif
 #endif
 			qmode = priv->plat->tx_queues_cfg[chan].mode_to_use;
 
@@ -2785,7 +3120,9 @@ static void tc9562mac_tx_clean(struct tc9562mac_priv *priv, u32 queue)
 		/* Check if the descriptor is owned by the DMA */
 		if (unlikely(status & tx_dma_own))
 			break;
-
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(4,19,10))
+		dma_rmb(); 
+#endif
 		/* Just consider the last segment and ...*/
 		if (likely(!(status & tx_not_ls))) {
 			/* ... verify the status error condition */
@@ -3001,8 +3338,10 @@ static void tc9562mac_mcgr_interrupt(struct tc9562mac_priv *priv)
 	DBGPR_FUNC("-->tc9562mac_mcgr_interrupt\n");
 
 	if (priv->hw->mac->mcgr_intr)
+	{
 		priv->hw->mac->mcgr_intr(priv->hw, priv->plat->mcgr_cfg,
 				priv->dma_cap.ppsoutnum);
+	}
 
 	DBGPR_FUNC("<--tc9562mac_mcgr_interrupt\n");
 }
@@ -3020,20 +3359,56 @@ static void tc9562mac_dma_interrupt(struct tc9562mac_priv *priv)
 	u32 tx_channel_count = priv->plat->tx_queues_to_use;
 	int status;
 	u32 chan;
+	struct tc9562mac_rx_queue *rx_q;
 
 	DBGPR_FUNC("-->tc9562mac_dma_interrupt\n");
 
 	for (chan = 0; chan < tx_channel_count; chan++) {
-		struct tc9562mac_rx_queue *rx_q = &priv->rx_queue[chan];
+#ifdef UNIFIED_DRIVER
+		/* Tx 1,2,3 and Rx ,1 ,2,3,5 handled by CM3, Tx - 0,4,5 and Rx 0, 4 handled by Host */
+		
+		/*So incase of Tx 3, raise napi but dont process RxQ = 3 */
+		if((priv->plat->tx_dma_ch_for_host[chan] == 0) && (priv->plat->rx_dma_ch_for_host[chan] == 0))
+			continue;
+#endif
+
+		rx_q = &priv->rx_queue[chan];
 
 		status = priv->hw->dma->dma_interrupt(priv->ioaddr,
 						      &priv->xstats, chan);
+						      
+#ifdef UNIFIED_DRIVER
+		if((priv->plat->tx_dma_ch_for_host[chan] == 1) && (priv->plat->rx_dma_ch_for_host[chan] == 1))
+		{
 		if (likely((status & handle_rx)) || (status & handle_tx)) {
 			if (likely(napi_schedule_prep(&rx_q->napi))) {
 				tc9562mac_disable_dma_irq(priv, chan);
 				__napi_schedule(&rx_q->napi);
 			}
 		}
+		}
+		else if(priv->plat->tx_dma_ch_for_host[chan] == 1)	/*Chan 3 Rx is used by CM3, so handle Host Tx Ch3*/
+		{				
+			if (status & handle_tx) {
+				if (likely(napi_schedule_prep(&rx_q->napi))) {
+					tc9562mac_disable_dma_irq(priv, chan);
+					__napi_schedule(&rx_q->napi);
+				}
+			}
+			
+		}
+		else {
+		    NMSGPR_ALERT("Rx channel %d being handled by Host\n", chan);
+		}
+#else
+		if (likely((status & handle_rx)) || (status & handle_tx)) {
+			if (likely(napi_schedule_prep(&rx_q->napi))) {
+				tc9562mac_disable_dma_irq(priv, chan);
+				__napi_schedule(&rx_q->napi);
+			}
+		}
+#endif
+
 #ifdef TC9562_UNSUPPORTED_UNTESTED_FEATURE
 		if (unlikely(status & tx_hard_error_bump_tc)) {
 			/* Try to bump up the dma threshold on this failure */
@@ -3164,8 +3539,13 @@ static void tc9562mac_check_ether_addr(struct tc9562mac_priv *priv)
 	DBGPR_FUNC("-->tc9562mac_check_ether_addr\n");
 
 	if (!is_valid_ether_addr(priv->dev->dev_addr)) {
+#ifndef UNIFIED_DRIVER
 		priv->hw->mac->get_umac_addr(priv->hw,
 					     priv->dev->dev_addr, 0);
+#else
+		priv->hw->mac->get_umac_addr(priv->hw,
+					     priv->dev->dev_addr, HOST_MAC_ADDR_OFFSET);
+#endif
 		if (!is_valid_ether_addr(priv->dev->dev_addr))
 			eth_hw_addr_random(priv->dev);
 		netdev_info(priv->dev, "device MAC address %pM\n",
@@ -3217,6 +3597,10 @@ static int tc9562mac_init_dma_engine(struct tc9562mac_priv *priv)
 
 		/* DMA RX Channel Configuration */
 		for (chan = 0; chan < rx_channels_count; chan++) {
+#ifdef UNIFIED_DRIVER
+				if(priv->plat->rx_dma_ch_for_host[chan] == 0)
+					continue;
+#endif
 			rx_q = &priv->rx_queue[chan];
 
 			priv->hw->dma->init_rx_chan(priv->ioaddr,
@@ -3232,6 +3616,10 @@ static int tc9562mac_init_dma_engine(struct tc9562mac_priv *priv)
 
 		/* DMA TX Channel Configuration */
 		for (chan = 0; chan < tx_channels_count; chan++) {
+#ifdef UNIFIED_DRIVER
+			if(priv->plat->tx_dma_ch_for_host[chan] == 0)
+				continue;
+#endif
 			tx_q = &priv->tx_queue[chan];
 
 			priv->hw->dma->init_chan(priv->ioaddr,
@@ -3278,9 +3666,10 @@ static int tc9562mac_init_dma_engine(struct tc9562mac_priv *priv)
  * Description:
  * This is the timer handler to directly invoke the tc9562mac_tx_clean.
  */
-static void tc9562mac_tx_timer(unsigned long data)
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(4,19,10))
+static void tc9562mac_tx_timer(struct timer_list *timer)
 {
-	struct tc9562mac_priv *priv = (struct tc9562mac_priv *)data;
+	struct tc9562mac_priv *priv = from_timer(priv, timer, txtimer);
 	u32 tx_queues_count = priv->plat->tx_queues_to_use;
 	u32 queue;
 
@@ -3292,6 +3681,28 @@ static void tc9562mac_tx_timer(unsigned long data)
 
 	DBGPR_FUNC("<--tc9562mac_tx_timer\n");
 }
+#else
+static void tc9562mac_tx_timer(unsigned long data)
+{
+	struct tc9562mac_priv *priv = (struct tc9562mac_priv *)data;
+	u32 tx_queues_count = priv->plat->tx_queues_to_use;
+	u32 queue;
+
+	DBGPR_FUNC("-->tc9562mac_tx_timer\n");
+
+	/* let's scan all the tx queues */
+	for (queue = 0; queue < tx_queues_count; queue++)
+	{
+#ifdef UNIFIED_DRIVER
+	if(priv->plat->tx_dma_ch_for_host[queue] == 0)
+		continue;
+#endif
+		tc9562mac_tx_clean(priv, queue);
+	}
+
+	DBGPR_FUNC("<--tc9562mac_tx_timer\n");
+}
+#endif
 
 /**
  * tc9562mac_init_tx_coalesce - init tx mitigation options.
@@ -3307,11 +3718,18 @@ static void tc9562mac_init_tx_coalesce(struct tc9562mac_priv *priv)
 
 	priv->tx_coal_frames = TC9562MAC_TX_FRAMES;
 	priv->tx_coal_timer = TC9562MAC_COAL_TX_TIMER;
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(4,19,10))
+	priv->txtimer.expires = TC9562MAC_COAL_TIMER(priv->tx_coal_timer);
+	timer_setup(&priv->txtimer, tc9562mac_tx_timer, 0);
+	/* mod_timer(&priv->txtimer, priv->tx_coal_timer); */
+	add_timer(&priv->txtimer);
+#else
 	init_timer(&priv->txtimer);
 	priv->txtimer.expires = TC9562MAC_COAL_TIMER(priv->tx_coal_timer);
 	priv->txtimer.data = (unsigned long)priv;
 	priv->txtimer.function = tc9562mac_tx_timer;
 	add_timer(&priv->txtimer);
+#endif
 
 	DBGPR_FUNC("<--tc9562mac_init_tx_coalesce\n");
 }
@@ -3327,15 +3745,27 @@ static void tc9562mac_set_rings_length(struct tc9562mac_priv *priv)
 	/* set TX ring length */
 	if (priv->hw->dma->set_tx_ring_len) {
 		for (chan = 0; chan < tx_channels_count; chan++)
+		{
+#ifdef UNIFIED_DRIVER
+			if(priv->plat->tx_dma_ch_for_host[chan] == 0)
+				continue;
+#endif
 			priv->hw->dma->set_tx_ring_len(priv->ioaddr,
 						       (DMA_TX_SIZE - 1), chan);
+		}
 	}
 
 	/* set RX ring length */
 	if (priv->hw->dma->set_rx_ring_len) {
 		for (chan = 0; chan < rx_channels_count; chan++)
+		{
+#ifdef UNIFIED_DRIVER
+			if(priv->plat->rx_dma_ch_for_host[chan] == 0) 
+				continue;
+#endif
 			priv->hw->dma->set_rx_ring_len(priv->ioaddr,
 						       (DMA_RX_SIZE - 1), chan);
+		}
 	}
 
 	DBGPR_FUNC("<--tc9562mac_set_rings_length\n");
@@ -3355,6 +3785,10 @@ static void tc9562mac_set_tx_queue_weight(struct tc9562mac_priv *priv)
 	DBGPR_FUNC("-->tc9562mac_set_tx_queue_weight\n");
 
 	for (queue = 0; queue < tx_queues_count; queue++) {
+#ifdef UNIFIED_DRIVER
+	if(priv->plat->tx_dma_ch_for_host[queue] == 0)
+		continue;
+#endif
 		weight = priv->plat->tx_queues_cfg[queue].weight;
 		priv->hw->mac->set_mtl_tx_queue_weight(priv->hw, weight, queue);
 	}
@@ -3379,6 +3813,12 @@ static u32 tc9562mac_configure_cbs(struct tc9562mac_priv *priv)
     priv->cbs_cfg_status[0] = -1;
 	/* queue 0 is reserved for legacy traffic */
 	for (queue = 1; queue < tx_queues_count; queue++) {
+#ifdef UNIFIED_DRIVER
+		if(priv->plat->tx_dma_ch_for_host[queue] == 0) {
+			priv->cbs_cfg_status[queue] = -1;
+			continue;
+		}
+#endif
 		mode_to_use = priv->plat->tx_queues_cfg[queue].mode_to_use;
 		if (mode_to_use == MTL_QUEUE_DCB) {
 		    priv->cbs_cfg_status[queue] = -1;
@@ -3538,11 +3978,12 @@ static void tc9562mac_configure_tsn(struct tc9562mac_priv *priv)
 	if (tx_queues_count > 1 && priv->hw->mac->config_cbs)
 		queues_av = tc9562mac_configure_cbs(priv);
 
+#ifndef UNIFIED_DRIVER
 	if (queues_av < MIN_AVB_QUEUES) {
 		pr_err("Not enough queues for AVB (only %d)\n", queues_av);
 		return;
 	}
-
+#endif
 	priv->tsn_ready = 1;
 
 	DBGPR_FUNC("<--tc9562mac_configure_tsn\n");
@@ -3675,13 +4116,13 @@ static int tc9562mac_est_configuration(struct tc9562mac_priv *priv)
 	int ret = -EINVAL;
 	uint value = 0;
 	DBGPR_FUNC("-->tc9562mac_est_configuration\n");
-    
+#ifndef UNIFIED_DRIVER
 	value = readl(priv->ptpaddr + PTP_TCR);
 	if(!(value & 0x00000001))
 	{
 		tc9562_ptp_configuration(priv);
 	}
-
+#endif
     priv->hwts_tx_en = 1;
     priv->hwts_rx_en = 1;
 
@@ -3880,6 +4321,9 @@ static int tc9562mac_hw_setup(struct net_device *dev, bool init_ptp)
 	u32 chan, value = 0;
 	int ret;
 
+#ifdef UNIFIED_DRIVER
+	NMSGPR_ALERT("Unified Driver Loading..\n");
+#endif
 	DBGPR_FUNC("-->tc9562mac_hw_setup\n");
 	/* DMA initialization and SW reset */
 	ret = tc9562mac_init_dma_engine(priv);
@@ -3912,10 +4356,13 @@ static int tc9562mac_hw_setup(struct net_device *dev, bool init_ptp)
 	priv->hw->mac->set_umac_addr(priv->hw, dev_cm3_addr, 3, 2); /*CM3 MAC Address, Channel 1 */
 
 #else
+#ifdef UNIFIED_DRIVER
     /*If PDC bit is not set (i.e packet duplication is off), binary representation*/
+	priv->hw->mac->set_umac_addr(priv->hw, dev->dev_addr, HOST_MAC_ADDR_OFFSET, 0); //2/* PCIe Host MAC Address, Channel 0*/
+#else
 	priv->hw->mac->set_umac_addr(priv->hw, dev->dev_addr, 2, 0); /* PCIe Host MAC Address, Channel 0*/
 	priv->hw->mac->set_umac_addr(priv->hw, dev_cm3_addr, 3, 1); /*CM3 MAC Address, Channel 1 */
-
+#endif
 #endif
 	/* PS and related bits will be programmed according to the speed */
 	if (priv->hw->pcs) {
@@ -3950,10 +4397,12 @@ static int tc9562mac_hw_setup(struct net_device *dev, bool init_ptp)
 		priv->plat->rx_coe = TC9562MAC_RX_COE_NONE;
 		priv->hw->rx_csum = 0;
 	}
-
+#ifndef UNIFIED_DRIVER
 	/* Enable the MAC Rx/Tx */
 	priv->hw->mac->set_mac(priv->ioaddr, true);
-
+#else
+	priv->hw->mac->set_mac(priv->ioaddr, false);
+#endif
 	/* Set the HW DMA mode and the COE */
 	tc9562mac_dma_operation_mode(priv);
 
@@ -3970,12 +4419,13 @@ static int tc9562mac_hw_setup(struct net_device *dev, bool init_ptp)
 		else if (ret)
 			netdev_warn(priv->dev, "PTP init failed\n");
 	}
-
+#ifndef UNIFIED_DRIVER
 	value = readl(priv->ptpaddr + PTP_TCR);
 	if(!(value & 0x00000001))
 	{
 		tc9562_ptp_configuration(priv);
 	}
+#endif
 	/* Initialize EST */
 	if (priv->synopsys_id >= DWMAC_CORE_5_00){
 		ret = tc9562mac_est_configuration(priv);
@@ -4112,6 +4562,11 @@ static int tc9562mac_open(struct net_device *dev)
 		}
 	}
 
+    /* To put the phydev in PHY_HALTED state */
+	if (dev->phydev) {
+		phy_stop(dev->phydev);
+	}
+
 	/* Extra statistics */
 	memset(&priv->xstats, 0, sizeof(struct tc9562mac_extra_stats));
 	priv->xstats.threshold = tc;
@@ -4199,7 +4654,12 @@ static int tc9562mac_open(struct net_device *dev)
         writel(0x1000000, priv->ioaddr + 0xf000); // MSI_OUT_EN: Enable only SW int bit[24]       
 
 #else
+#ifndef UNIFIED_DRIVER
         writel(0x0001f9ff, priv->ioaddr + 0xf000); // MSI_OUT_EN: Enable All mac int
+#else
+		/* Enable only Host related channels - LPI, PMT, Tx - 0,4,5, Rx - 0,4*/
+		writel(0x10088CB, priv->ioaddr + 0xf000); /*Also Enable SW-MSI*/
+#endif
 
 #endif
 
@@ -4208,7 +4668,11 @@ static int tc9562mac_open(struct net_device *dev)
 	/* Enable interrupt  */
 	rd_val = readl(priv->ioaddr + INTMCUMASK1);
 	rd_val &= 0xc0000000;
+#ifndef UNIFIED_DRIVER
 	rd_val |= 0xFF0000FF;//RX DMA interrupts for channel 5,6,7 not enabled.
+#else
+	rd_val |= 0xFE8ECCFF; /* LPI, PMT, Tx - 0,4,5, Rx - 0,4 are enabled */
+#endif
 	writel(rd_val, priv->ioaddr + INTMCUMASK1);
 
 	rd_val = readl(priv->ioaddr + INTMCUMASK2);
@@ -4276,6 +4740,11 @@ static int tc9562mac_open(struct net_device *dev)
     tc9562_dump_emac_registers(priv);
 #endif
 
+#ifdef UNIFIED_DRIVER
+	/* Raise MCU Flag so CM3 FW can start operation*/
+	writel(1 << 12, priv->ioaddr + 0x8054);
+
+#endif
 	DBGPR_FUNC("<-- tc9562mac_open \n");
 	return 0;
 
@@ -4310,7 +4779,10 @@ dma_desc_error:
 static int tc9562mac_release(struct net_device *dev)
 {
 	struct tc9562mac_priv *priv = netdev_priv(dev);
-
+#ifdef UNIFIED_DRIVER	
+	int rd_val = 0, reg;
+    int reset_default_value = 0x02F700B0, clock_default_value = 0x00003A05;
+#endif
 	DBGPR_FUNC("-->tc9562mac_release\n");
 
 	if (priv->eee_enabled)
@@ -4319,6 +4791,9 @@ static int tc9562mac_release(struct net_device *dev)
 	/* Stop and disconnect the PHY */
 	if (dev->phydev) {
 		phy_stop(dev->phydev);
+        priv->oldlink = false;
+	    priv->speed = SPEED_UNKNOWN;
+     	priv->oldduplex = DUPLEX_UNKNOWN;
 		phy_disconnect(dev->phydev);
 	}
 
@@ -4351,6 +4826,84 @@ static int tc9562mac_release(struct net_device *dev)
 #endif
 
 	tc9562mac_release_ptp(priv);
+	
+#ifdef UNIFIED_DRIVER
+    
+#ifdef UNIFIED_DRIVER
+/* Stopping TDM before removing Driver */
+    if (priv->tdm_start == 1)       
+    {
+        void __user *data = NULL;
+        tc9562_ioctl_tdm_stop(priv, data);    
+    }
+#endif
+	
+    {
+        /* In FLASH Mode the FW is loaded only during boot. CM3 Reset Required in Flash Mode to Sync Firmware and Host Driver States.*/
+        {
+            /* CM3 System Reset for Managing States in Flash Mode*/	
+
+            rd_val = readl(priv->ioaddr + 0xa000);      
+            rd_val &= ~0x00000003;
+            writel(rd_val, priv->ioaddr + 0xa000);      /*Clear Gloabal EMAC TX RX */
+	        writel( clock_default_value, priv->ioaddr + 0x1004); 
+            rd_val = readl(priv->ioaddr + 0x1004);      
+
+            rd_val = readl(priv->ioaddr + 0x1008);
+            rd_val |= (reset_default_value | 0x00000001); /*Assert */
+            writel( rd_val, priv->ioaddr + 0x1008); 
+
+#ifdef DEBUG_UNIFIED
+            rd_val = readl(priv->ioaddr + 0x1004);
+            NMSGPR_ALERT("1004 : %x\n",rd_val);	
+            rd_val = readl(priv->ioaddr + 0x1008);
+            NMSGPR_ALERT("1008 : %x\n",rd_val);	
+#endif
+            rd_val = readl(priv->ioaddr + 0x1008);
+            
+            rd_val = readl(priv->ioaddr + 0x1008);
+            rd_val &= (~0x00000001); /*De-assert*/	
+            writel( rd_val, priv->ioaddr + 0x1008); 
+	
+            DBGPR_FUNC("CM3 System Reset Complete\n");
+#ifdef DEBUG_UNIFIED
+            rd_val = readl(priv->ioaddr + 0x1004);
+            NMSGPR_ALERT("1004 : %x\n",rd_val);
+	
+            rd_val = readl(priv->ioaddr + 0x1008);
+            NMSGPR_ALERT("1008 : %x\n",rd_val);
+#endif
+	    }
+	}
+	
+	/* The CM3 Firmware will be loaded during ndo_close when Host Initiated Boot Mode is selected.*/
+	
+	/* This is added to support ifconfig up/down scenario for UNIFIED_DRIVER.
+       During ndo_open DMA_Mode SWR Bit is set which resets EMAC, MTL, DMA. 
+       To Re-Initialize FW part of EMAC the following Code is added*/
+    
+    reg = readl(priv->ioaddr + NMODESTS_OFFSET);
+    NMSGPR_ALERT("0x%x\n", reg);
+    if((reg & TC9562_NMODESTS_HOST_BOOT_MASK) == TC9562_NMODESTS_HOST_BOOT_MASK) 
+    {
+        int ret;
+        struct tc9562mac_resources res;
+    
+        res.addr = priv->ioaddr;
+        res.tc9562_SRAM_pci_base_addr = priv->tc9562_SRAM_pci_base_addr;
+	    res.tc9562_FLASH_pci_base_addr = priv->tc9562_FLASH_pci_base_addr;
+	    res.irq = priv->dev->irq ;
+	    
+        ret = tc9562_load_firmware(priv->device, &res);
+        if(ret < 0) 
+        {
+            NMSGPR_ERR("Firmware load failed\n");
+        }
+    }
+	
+#endif
+
+
 #ifdef TC9562_POLLING_METHOD
 	cancel_delayed_work_sync(&task);
 #endif //TC9562_POLLING_METHOD
@@ -4581,7 +5134,12 @@ static netdev_tx_t tc9562mac_tso_xmit(struct sk_buff *skb, struct net_device *de
 
 	/* If context desc is used to change MSS */
 	if (mss_desc)
+    {
+#if (LINUX_VERSION_CODE > KERNEL_VERSION(3, 18, 140))
+		dma_wmb();
+#endif
 		priv->hw->desc->set_tx_owner(mss_desc);
+    }
 
 	/* The own bit must be the latest setting done when prepare the
 	 * descriptor and then barrier is needed to make sure that
@@ -4994,8 +5552,17 @@ static netdev_tx_t tc9562mac_enxmit(struct sk_buff *skb, struct net_device *dev)
 				launch_time = EST_LAUNCH_TIME_OFFSET;
 				
 			}else{
-						
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(4,19,15))
+				if((tx_q->launch_time) && (skb->tstamp)){
+
+					launch_time = skb->tstamp;
+
+				}else{
+#endif						
 				launch_time = app_launch_time;
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(4,19,15))
+				}
+#endif
 			}
 
 #ifdef TEMP_SG_4TSO
@@ -5097,6 +5664,14 @@ static netdev_tx_t tc9562mac_enxmit(struct sk_buff *skb, struct net_device *dev)
 				launch_time = (lt_s << 24) | lt_ns;
 				
 			}else{
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(4,19,15))
+
+				if((tx_q->launch_time) && (skb->tstamp)){
+
+					launch_time = skb->tstamp;
+
+				}else{
+#endif
 				static u64 ns;
 				u64 lt;
 				u32 lt_s, lt_ns;
@@ -5114,7 +5689,10 @@ static netdev_tx_t tc9562mac_enxmit(struct sk_buff *skb, struct net_device *dev)
 
 				launch_time = (lt_s << 24) | lt_ns;
 			}
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(4,19,15))
 
+			}
+#endif
 		//efirst->des4 |= (0x1 << 31);//LTV enabled
 		tv_flag = 1; 
 		}
@@ -5266,6 +5844,13 @@ static netdev_tx_t tc9562mac_nxmit(struct sk_buff *skb, struct net_device *dev)
 
 	DBGPR_FUNC("-->tc9562mac_nxmit\n");
 
+#ifdef UNIFIED_DRIVER
+	if(queue == 1 || queue == 2 || queue == 5)
+    {
+		printk("Trying to send data on CM3 owned Tx Channel = %d\n", queue);
+		return NETDEV_TX_BUSY;
+	}
+#endif
 	tx_q = &priv->tx_queue[queue];
 
 	/* Manage oversized TCP frames for GMAC4 device */
@@ -5833,13 +6418,19 @@ static int tc9562mac_rx(struct tc9562mac_priv *priv, int limit, u32 queue)
 					   frame_len);
 				print_pkt(skb->data, frame_len);
 			}
-
+#ifdef UNIFIED_DRIVER
+            if(priv->plat->rx_dma_ch_for_host[HOST_GPTP_CHANNEL] == 1)      /*In Unified Rx Timestamp All is Disabled, GPTP is handled in CM3*/
+            {
+#endif
 #if defined(RX_LOGGING_TRACE)
 			tc9562mac_get_rx_hwtstamp(priv, p, np, skb, queue);
 #else
 			tc9562mac_get_rx_hwtstamp(priv, p, np, skb);
 #endif
 
+#ifdef UNIFIED_DRIVER
+            }
+#endif
 			tc9562mac_rx_vlan(priv->dev, skb);
 
 			skb->protocol = eth_type_trans(skb, priv->dev);
@@ -5891,12 +6482,26 @@ static int tc9562mac_poll(struct napi_struct *napi, int budget)
 
 	/* check all the queues */
 	for (queue = 0; queue < tx_count; queue++)
+	{
+#ifdef UNIFIED_DRIVER
+		if(priv->plat->tx_dma_ch_for_host[queue] == 0)
+			continue;
+#endif
 		tc9562mac_tx_clean(priv, queue);
 
+    }
+    
+#ifdef UNIFIED_DRIVER
+	if(priv->plat->rx_dma_ch_for_host[chan] == 1)
+	{
+#endif
     /* Rx Ch 6 not configured. Skip it */
     if(chan != (tx_count - 1)) {
     	work_done = tc9562mac_rx(priv, budget, rx_q->queue_index);
 	}
+#ifdef UNIFIED_DRIVER
+	}
+#endif
 	
 	if (work_done < budget) {
 #if (LINUX_VERSION_CODE <= KERNEL_VERSION(3, 18, 140))
@@ -6311,6 +6916,10 @@ static irqreturn_t tc9562mac_interrupt(int irq, void *dev_id)
 	u32 queue;
 	u32 tc9562_intc_intstatus;
 	unsigned long mmc_irq_flags;
+	struct tc9562mac_rx_queue *rx_q;
+#ifdef UNIFIED_DRIVER
+	int rd_val;
+#endif
 
 	DBGPR_FUNC("-->tc9562mac_interrupt\n");
 	/* queues_count = (rx_cnt > tx_cnt) ? rx_cnt : tx_cnt; */
@@ -6356,7 +6965,13 @@ static irqreturn_t tc9562mac_interrupt(int irq, void *dev_id)
 
 		if (priv->synopsys_id >= DWMAC_CORE_4_00) {
 			for (queue = 0; queue < queues_count; queue++) {
-				struct tc9562mac_rx_queue *rx_q =
+#ifdef UNIFIED_DRIVER
+	/* Host Tx - 0, 4, 5, Host Rx - 0, 4. TxCh5 needs to be handled by napi. 
+	Both Tx and Rx are handled in NAPI. so handle the Host related channels in NAPI function */
+			if(priv->plat->rx_dma_ch_for_host[queue] != 1)
+				continue;
+#endif
+				rx_q =
 				&priv->rx_queue[queue];
 
 				mtl_status = status |
@@ -6384,21 +6999,50 @@ static irqreturn_t tc9562mac_interrupt(int irq, void *dev_id)
 	/* To handle DMA interrupts */
 	tc9562mac_dma_interrupt(priv);
 	
+#ifdef UNIFIED_DRIVER
+
+	rd_val = readl(priv->ioaddr + 0xf054);
+	
+    if(rd_val) 
+	{
+#ifdef UNIFIED_DRIVER_TEST_DBG2
+        {
+            static unsigned int test = 0, s, ns;
+            
+            if(test < 20)
+            {
+                ns = readl(priv->ioaddr + 0xab0c);
+                s = readl(priv->ioaddr + 0xab08);
+
+	            DBGPR_UNIFIED_2("C: %d\n ns: %d\n s: %d\n", test++);
+            }
+      	}
+#endif
+		/* Clear SW MSI mask for vector 0 */
+		DBGPR_TEST("Clear SW MSI mask\n");
+		writel( 0x1, priv->ioaddr + 0xf054); /* SW_MSI_CLR, Clear Software MSI (internal interrupt24).*/
+	}
+#endif
+
+#ifndef UNIFIED_DRIVER
 	/* Handle MAC Events */
 	if(tc9562_intc_intstatus & INTC_INTSTS_MAC_EVENT) {
 	    /* If any of the MMC Interrupt occured, update all values */
 	    if( (priv->mmcaddr + MMC_RX_INTR) || (priv->mmcaddr + MMC_TX_INTR) 
 	        || (priv->mmcaddr + MMC_RX_IPC_INTR) || (priv->mmcaddr + MMC_FPE_TX_INTR) || (priv->mmcaddr + MMC_FPE_RX_INTR) ) {
-	        
+#endif
+            /* To Reduce the frequency of Shared MAC Event Interrupt, Read-Clear MMC Register values at every interrupt*/
 	        if (priv->dma_cap.rmon) {
 	            spin_lock_irqsave(&priv->mmc_lock, mmc_irq_flags);
     			dwmac_mmc_read(priv->mmcaddr, &priv->mmc);
     			spin_unlock_irqrestore(&priv->mmc_lock, mmc_irq_flags);
 			}
+#ifndef UNIFIED_DRIVER
 	    }
 	    
 	}
-	
+#endif
+    	
 #ifdef TC9562_MSIGEN_VERIFICATION
 
 #ifdef TC9562_MSI_GEN_SW_AGENT /*Code under macro is used when SW is used to generate MSI interrupt (bit[24])*/
@@ -6439,7 +7083,11 @@ static irqreturn_t tc9562mac_interrupt(int irq, void *dev_id)
     	/* Enable interrupt  */
     	rd_val = readl(priv->ioaddr + INTMCUMASK1);
     	rd_val &= 0xc0000000;
+#ifndef UNIFIED_DRIVER
     	rd_val |= 0xFF0000FF;//RX DMA interrupts for channel 5,6,7 not enabled.
+#else
+		rd_val |= 0xFF7074FF; /* LPI, PMT, Tx - 0,4,5, Rx - 0,4 are enabled */
+#endif
     	writel(rd_val, priv->ioaddr + INTMCUMASK1);
 
     	rd_val = readl(priv->ioaddr + INTMCUMASK2);
@@ -7179,14 +7827,18 @@ int tc9562_PPSOUT_Config_real(struct tc9562mac_priv *priv,
                            struct tc9562_PPS_Config *tc9562_pps_cfg)
 {
   unsigned int s, ss, val, align_ns = 0;
-  int value, interval, width, ppscmd, trgtmodsel = 0x3;
-
+  
+#ifndef UNIFIED_DRIVER
+	int value, interval, width, ppscmd, trgtmodsel = 0x3;
   value = readl(priv->ptpaddr + PTP_TCR);
   if(!(value & 0x00000001))
 	{
 		tc9562_ptp_configuration(priv);
 		printk("tc9562_PPSOUT_Config_real : ptp configuration");	
 	}
+#else
+	int interval, width, ppscmd, trgtmodsel = 0x3;
+#endif
 
   interval = (tc9562_pps_cfg->ptpclk_freq + tc9562_pps_cfg->ppsout_freq/2) 
                                        / tc9562_pps_cfg->ppsout_freq;
@@ -7875,6 +8527,18 @@ static int tc9562mac_extension_ioctl(struct tc9562mac_priv *priv, void __user *d
         return tc9562_config_vlan_filter(priv, data);
     case tc9562_PTPOFFLOADING:
         return tc9562_config_ptpoffload(priv, data);
+#ifdef UNIFIED_DRIVER
+#ifdef UNIFIED_DRIVER
+    case TC9562_TDM_INIT:   
+    {            
+        return tc9562_ioctl_tdm_start(priv, data);
+    }
+    case TC9562_TDM_UNINIT:
+    {           
+        return tc9562_ioctl_tdm_stop(priv, data);
+    }    
+#endif
+#endif
 	default:
 		return -EINVAL;
 	}
@@ -7963,6 +8627,80 @@ static int tc9562mac_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
 	return ret;
 }
 
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(4,19,15))
+static int tc9562mac_setup_tc_block_cb(enum tc_setup_type type, void *type_data,
+				    void *cb_priv)
+{
+	struct tc9562mac_priv *priv = cb_priv;
+	int ret = -EOPNOTSUPP;
+	
+	tc9562mac_disable_all_queues(priv);
+
+	switch (type) {
+	case TC_SETUP_CLSU32:
+		if (tc_cls_can_offload_and_chain0(priv->dev, type_data)){
+			ret = priv->hw->tc->setup_cls_u32(priv->dev, type_data);
+			}
+		break;
+	default:
+		break;
+	}
+
+	tc9562mac_enable_all_queues(priv);
+	return ret;
+}
+static int tc9562mac_setup_tc_block(struct tc9562mac_priv *priv,
+				 struct tc_block_offload *f)
+{
+	if (f->binder_type != TCF_BLOCK_BINDER_TYPE_CLSACT_INGRESS)
+		return -EOPNOTSUPP;
+
+	switch (f->command) {
+	case TC_BLOCK_BIND:
+		return tcf_block_cb_register(f->block, tc9562mac_setup_tc_block_cb,
+				priv, priv, f->extack);
+	case TC_BLOCK_UNBIND:
+		tcf_block_cb_unregister(f->block, tc9562mac_setup_tc_block_cb, priv);
+		return 0;
+	default:
+		return -EOPNOTSUPP;
+	}
+}
+static int tc9562mac_setup_tc(struct net_device *ndev, enum tc_setup_type type,
+			   void *type_data)
+{
+	struct tc9562mac_priv *priv = netdev_priv(ndev);
+
+	switch (type) {
+	case TC_SETUP_BLOCK:
+		return tc9562mac_setup_tc_block(priv, type_data);
+	case TC_SETUP_QDISC_CBS:
+		return priv->hw->tc->setup_cbs(ndev, type_data);
+	case TC_SETUP_QDISC_ETF:
+		return priv->hw->tc->launch_time(ndev, type_data);
+		
+	default:
+		return -EOPNOTSUPP;
+	}
+}
+#endif
+
+static int tc9562_set_mac_address(struct net_device *dev, void *addr)
+{
+	struct tc9562mac_priv *priv = netdev_priv(dev);
+	int ret = 0;
+
+	ret = eth_mac_addr(dev, addr);
+	if (ret)
+		return ret;
+#ifndef UNIFIED_DRIVER
+	priv->hw->mac->set_umac_addr(priv->hw, dev->dev_addr, 2, 0);
+#else
+    priv->hw->mac->set_umac_addr(priv->hw, dev->dev_addr, HOST_MAC_ADDR_OFFSET, 0);
+#endif
+
+	return ret;
+}
 #ifdef CONFIG_DEBUG_FS
 static struct dentry *tc9562mac_fs_dir;
 
@@ -8001,11 +8739,17 @@ static int tc9562mac_sysfs_ring_read(struct seq_file *seq, void *v)
 	u32 rx_count = priv->plat->rx_queues_to_use + 1;
 	u32 tx_count = priv->plat->tx_queues_to_use;
 	u32 queue;
+	struct tc9562mac_rx_queue *rx_q;
+	struct tc9562mac_tx_queue *tx_q;
 
 	DBGPR_FUNC("-->tc9562mac_sysfs_ring_read\n");
 	
 	for (queue = 0; queue < rx_count; queue++) {
-		struct tc9562mac_rx_queue *rx_q = &priv->rx_queue[queue];
+#ifdef UNIFIED_DRIVER
+	if(priv->plat->rx_dma_ch_for_host[queue] == 0)
+		continue;
+#endif
+		rx_q = &priv->rx_queue[queue];
 
 		seq_printf(seq, "RX Queue %d:\n", queue);
 
@@ -8021,7 +8765,11 @@ static int tc9562mac_sysfs_ring_read(struct seq_file *seq, void *v)
 	}
 
 	for (queue = 0; queue < tx_count; queue++) {
-		struct tc9562mac_tx_queue *tx_q = &priv->tx_queue[queue];
+#ifdef UNIFIED_DRIVER
+		if(priv->plat->tx_dma_ch_for_host[queue] == 0)
+			continue;
+#endif
+		tx_q = &priv->tx_queue[queue];
 
 		seq_printf(seq, "TX Queue %d:\n", queue);
 
@@ -8211,6 +8959,9 @@ static const struct net_device_ops tc9562mac_netdev_ops = {
 	.ndo_set_rx_mode = tc9562mac_set_rx_mode,
 	.ndo_tx_timeout = tc9562mac_tx_timeout,
 	.ndo_do_ioctl = tc9562mac_ioctl,
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(4,19,15))	
+	.ndo_setup_tc = tc9562mac_setup_tc,
+#endif
 #ifdef TC9562_UNSUPPORTED_UNTESTED_FEATURE
 #ifdef CONFIG_NET_POLL_CONTROLLER
 	.ndo_poll_controller = tc9562mac_poll_controller,
@@ -8222,7 +8973,7 @@ static const struct net_device_ops tc9562mac_netdev_ops = {
 	.ndo_tsn_link_configure = tc9562mac_tsn_link_configure,
 #endif
 	.ndo_select_queue	= tc9562mac_tsn_select_queue,
-	.ndo_set_mac_address = eth_mac_addr,
+	.ndo_set_mac_address = tc9562_set_mac_address, 
 	.ndo_vlan_rx_add_vid = tc9562_vlan_rx_add_vid,
 	.ndo_vlan_rx_kill_vid = tc9562_vlan_rx_kill_vid,
 };
@@ -8336,6 +9087,9 @@ static int tc9562mac_hw_init(struct tc9562mac_priv *priv)
 		tc9562mac_selec_desc_mode(priv);
 #endif /* TC9562_UNSUPPORTED_UNTESTED_FEATURE */ 
 
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(4,19,15))
+	priv->hw->tc = &dwmac510_tc_ops;
+#endif
 	if (priv->plat->rx_coe) {
 		priv->hw->rx_csum = priv->plat->rx_coe;
 		dev_info(priv->device, "RX Checksum Offload Engine supported\n");
@@ -8780,6 +9534,9 @@ int tc9562mac_dvr_probe(struct device *device,
 	priv->wol_irq = res->irq;
 	priv->lpi_irq = res->irq;
 
+#ifdef UNIFIED_DRIVER
+	priv->tdm_start = 0;
+#endif
 	/* Read mac address from config.ini file */
 	++mdio_bus_id;
 	parse_config_file();
@@ -8855,6 +9612,12 @@ int tc9562mac_dvr_probe(struct device *device,
 		priv->tso = false;
 	}
 	printk("priv->tso : %d\n", priv->tso);
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(4,19,15))
+	ret = priv->hw->tc->init(ndev);
+	if (!ret) {
+		ndev->hw_features |= NETIF_F_HW_TC;
+	}
+#endif
 	ndev->features |= ndev->hw_features | NETIF_F_HIGHDMA;
 	NDBGPR_L2("ndev->hw_features : %llx", ndev->hw_features);
 	ndev->watchdog_timeo = msecs_to_jiffies(watchdog);
@@ -9043,7 +9806,11 @@ int tc9562mac_suspend(struct device *dev)
 
 	if (!ndev )
 		return 0;
-
+#ifdef TC9562_UNSUPPORTED_UNTESTED_FEATURE
+    if (priv->eee_enabled)
+		tc9562mac_disable_eee_mode(priv); 
+#endif /* TC9562_UNSUPPORTED_UNTESTED_FEATURE */
+    
     priv->hw->mac->set_umac_addr(priv->hw, ndev->dev_addr, 0, 0);
     if(netif_running(ndev)) {
         rtnl_lock();
@@ -9057,8 +9824,6 @@ int tc9562mac_suspend(struct device *dev)
 
 	netif_device_detach(ndev);
 	tc9562mac_stop_all_queues(priv);
-
-	tc9562mac_disable_all_queues(priv);
 
 	/* Stop TX/RX DMA */
 	tc9562mac_stop_all_dma(priv);
@@ -9104,6 +9869,7 @@ int tc9562mac_resume(struct device *dev)
 	unsigned long flags;
     int reg_data = 0,ret = 0;
     struct tc9562mac_resources res;
+	uint8_t SgmSigPol = 1; /* To handle SGM_SIG_DET */
 
 	DBGPR_FUNC("-->tc9562mac_resume\n");
 
@@ -9112,10 +9878,19 @@ int tc9562mac_resume(struct device *dev)
 	writel(reg_data, priv->ioaddr + 0x1008);
 
 	if (ENABLE_SGMII_INTERFACE == INTERFACE_SELECTED){
-        // SGMII interface
-        reg_data = readl(priv->ioaddr + 0x1524);
-        reg_data = (reg_data & ~0x00f00000) | 0x00200000;
-        writel(reg_data, priv->ioaddr + 0x1524);	
+        /* SGMII interface */
+		if(1 == ENABLE_SGM_SIG_DET){
+            reg_data = readl(priv->ioaddr + 0x1524);
+            reg_data = (reg_data & ~0x00f00000) | 0x00200000;
+            writel(reg_data, priv->ioaddr + 0x1524);	
+			SgmSigPol = 0; /* Active High */
+		}else if(2 == ENABLE_SGM_SIG_DET){
+			reg_data = readl(priv->ioaddr + 0x1524);
+			reg_data = (reg_data & ~0x00f00000) | 0x00200000;
+			writel(reg_data, priv->ioaddr + 0x1524);
+			
+			SgmSigPol = 1; /* Active low */
+		}
 	}
 
 	/* Interface configuration */
@@ -9128,6 +9903,10 @@ int tc9562mac_resume(struct device *dev)
  	else if(ENABLE_SGMII_INTERFACE == INTERFACE_SELECTED)
 		reg_data |= 0x10;
 
+	reg_data &= ~(0x00000800); /* Mask Polarity */
+	if(1 == SgmSigPol){
+		reg_data |= 0x00000800; /* Set Active low */
+	}
     writel(reg_data, priv->ioaddr + 0x0010);
 
 	/* De-assertion of EMAC software Reset*/
@@ -9191,8 +9970,6 @@ int tc9562mac_resume(struct device *dev)
 	//tc9562mac_hw_setup(ndev, false);
 	//tc9562mac_init_tx_coalesce(priv);
 	//tc9562mac_set_rx_mode(ndev);
-
-	tc9562mac_enable_all_queues(priv);
 
 	tc9562mac_start_all_queues(priv);
 

@@ -4,7 +4,7 @@
  * tc9562mac_ioctl.h
  *
  * Copyright (C) 2017 Synopsys, Inc. and/or its affiliates.
- * Copyright (C) 2019 Toshiba Electronic Devices & Storage Corporation
+ * Copyright (C) 2020 Toshiba Electronic Devices & Storage Corporation
  *
  * This file has been derived from the STMicro and Synopsys Linux driver,
  * and developed or modified for TC9562.
@@ -25,6 +25,9 @@
  */
 
 /*! History:
+ *  26 Feb 2020 : 1. Added Unified Driver feature.
+                  2. Added TDM Start/Stop Support for Unified Design
+ *  VERSION     : 01-01
  *  30 Sep 2019 : Base lined
  *  VERSION     : 01-00
  */
@@ -68,6 +71,8 @@ enum {
     tc9562_PCIE_CONFIG_REG_WR = 0x21,
     tc9562_VLAN_FILTERING = 0x22,
     tc9562_PTPOFFLOADING = 0x23,
+    TC9562_TDM_INIT = 0x24,
+    TC9562_TDM_UNINIT = 0x25,
 };
 
 #define TC9562MAC_IOCTL_QMODE_DCB		0x0
@@ -335,6 +340,12 @@ struct tc9562_config_ptpoffloading {
 	int domain_num;
     int mc_uc; 
     unsigned char mc_uc_addr[ETH_ALEN];
+};
+
+struct tc9562mac_ioctl_tdm_config {
+	uint32_t cmd;
+	uint32_t queue_idx;
+    TDM_I2S_CONF tdm_init_config;
 };
 
 #define SIOCSTIOCTL	SIOCDEVPRIVATE

@@ -4,7 +4,7 @@
  * common.h 
  *
  * Copyright (C) 2007-2009 STMicroelectronics Ltd
- * Copyright (C) 2019 Toshiba Electronic Devices & Storage Corporation
+ * Copyright (C) 2020 Toshiba Electronic Devices & Storage Corporation
  *
  * This file has been derived from the STMicro Linux driver,
  * and developed or modified for TC9562.
@@ -25,6 +25,9 @@
  */
 
 /*! History:
+ *  26 Feb 2020 : 1. Added 4.19 kernel support.
+                  2. Added Unified Driver feature.
+ *  VERSION     : 01-01
  *  30 Sep 2019 : Base lined
  *  VERSION     : 01-00
  */
@@ -47,6 +50,9 @@
 #include "descs.h"
 #include "mmc.h"
 
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(4,19,15))
+#include <net/pkt_sched.h>
+#endif
 
 /* UnSupported and UnTested TC9562 Feature macro */
 
@@ -61,7 +67,12 @@
 
 /* skip the addresses added during hw setup*/
 /*To do: If source address (SA) replacement or SA insertion feature is supported, MAC_ADDR_ADD_SKIP_OFST should be increased accordingly */
+#ifndef UNIFIED_DRIVER
 #define MAC_ADDR_ADD_SKIP_OFST 3
+#else
+#define MAC_ADDR_ADD_SKIP_OFST 8
+#define HOST_MAC_ADDR_OFFSET 8
+#endif
 //#define VERIFY_PPO_USING_AUX
 
 
@@ -617,6 +628,7 @@ struct dma_features {
 	unsigned int spram;
 	unsigned int frpsel;
 	unsigned int frpes;
+	unsigned int frpbs;
 	/* PPS */
 	unsigned int ppsoutnum;
 };
@@ -647,6 +659,8 @@ struct dma_features {
 #define ETHNORMAL_LEN		1500
 #define MAX_SUPPORTED_MTU (ETH_FRAME_LEN + ETH_FCS_LEN + VLAN_HLEN)
 #define MIN_SUPPORTED_MTU (ETH_ZLEN + ETH_FCS_LEN + VLAN_HLEN)
+
+#define HOST_SHARED_MEM_OFFSET 0x3FE00
 
 /* Descriptors helpers */
 struct tc9562mac_desc_ops {
@@ -884,6 +898,10 @@ struct tc9562mac_ops {
 			struct mac_device_info *hw, unsigned int spram,
 			unsigned int frpsel, unsigned int frpes,
 			struct tc9562mac_rx_parser_cfg *cfg);
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(4,19,15))
+	int (*rx_config)(void *priv, void *entries,
+		      unsigned int count);
+#endif
 	/* PPS */
 	int (*pps_init)(struct net_device *ndev, struct mac_device_info *hw,
 			int index, struct tc9562mac_pps_cfg *cfg);
@@ -942,12 +960,27 @@ struct tc9562mac_mode_ops {
 	void (*clean_desc3) (void *priv, struct dma_desc *p);
 };
 
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(4,19,15))
+struct tc9562_tc_ops {
+	int (*init) (struct net_device *ndev);
+	int (*setup_cbs) (struct net_device *ndev,
+			void *qopt);
+	int (*setup_cls_u32) (struct net_device *ndev,
+			    void *qopt);
+	int (*launch_time) (struct net_device *ndev,
+			void *qopt);
+	
+};
+#endif
 struct mac_device_info {
 	const struct tc9562mac_ops *mac;
 	const struct tc9562mac_desc_ops *desc;
 	const struct tc9562mac_dma_ops *dma;
 	const struct tc9562mac_mode_ops *mode;
 	const struct tc9562mac_hwtimestamp *ptp;
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(4,19,15))
+	const struct tc9562_tc_ops *tc;
+#endif
 	struct mii_regs mii;	/* MII register Addresses */
 	struct mac_link link;
 	void __iomem *pcsr;     /* vpointer to device CSRs */
@@ -995,6 +1028,9 @@ extern const struct tc9562mac_mode_ops chain_mode_ops;
 
 extern const struct tc9562mac_desc_ops dwmac4_desc_ops;
 extern const struct tc9562mac_desc_ops dwmac4_edesc_ops;
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(4,19,15))
+extern const struct tc9562_tc_ops dwmac510_tc_ops;
+#endif
 
 /**
  * tc9562mac_get_synopsys_id - return the SYINID.

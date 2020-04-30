@@ -3,7 +3,7 @@
  *
  * tc9562_pci.c
  *
- * Copyright (C) 2019 Toshiba Electronic Devices & Storage Corporation
+ * Copyright (C) 2020 Toshiba Electronic Devices & Storage Corporation
  *
  *
  * This program is free software; you can redistribute it and/or modify
@@ -22,6 +22,9 @@
  */
 
 /*! History:
+ *  26 Feb 2020 : 1. Added Unified Driver feature.
+                  2. Added SGMII Interface support.
+ *  VERSION     : 01-01
  *  30 Sep 2019 : Base lined
  *  VERSION     : 01-00
  */
@@ -125,7 +128,7 @@ static u32 snps_est_gcl_entries[] = {
 };
 #endif 
 
-const tc9562_version_t tc9562_version = {'R', 1, 0, 0};
+const tc9562_version_t tc9562_version = {'R', 1, 0, 1};
 
 /*
 FRP Instruction table done based on following :
@@ -404,7 +407,11 @@ static int tc9562_default_data(struct pci_dev *pdev,
 	/* MTL Configuration */
 	/* Static Mapping */
 	plat->rx_queues_cfg[0].chan = 2; /*static mapping */
+#ifdef UNIFIED_DRIVER
+	plat->rx_queues_cfg[1].chan = 4; /*static mapping */
+#else
 	plat->rx_queues_cfg[1].chan = 3; /*static mapping */
+#endif
 	plat->rx_queues_cfg[2].chan = 4; /* 4/3 : NA if dynamic(FRP enabled)*/
 	plat->rx_queues_cfg[3].chan = 0; /* 0/1 : NA if dynamic*/
 
@@ -494,6 +501,21 @@ static int tc9562_default_data(struct pci_dev *pdev,
     plat->rx_queues_cfg[3].use_prio = true;
 	plat->rx_queues_cfg[3].prio = 0xFF ; /* All tagged legacy packets must be routed to RxQ3 */
 
+#ifdef UNIFIED_DRIVER
+	plat->rx_dma_ch_for_host[0] = 1;
+	plat->rx_dma_ch_for_host[1] = 0;
+	plat->rx_dma_ch_for_host[2] = 0;
+	plat->rx_dma_ch_for_host[3] = 0;
+	plat->rx_dma_ch_for_host[4] = 1;
+	plat->rx_dma_ch_for_host[5] = 0;
+
+	plat->tx_dma_ch_for_host[0] = 1;
+	plat->tx_dma_ch_for_host[1] = 0;
+	plat->tx_dma_ch_for_host[2] = 0;
+	plat->tx_dma_ch_for_host[3] = 1;
+	plat->tx_dma_ch_for_host[4] = 1;
+	plat->tx_dma_ch_for_host[5] = 0;
+#endif
 	DBGPR_FUNC("<--tc9562_default_data\n");
 	return 0;
 }
@@ -774,6 +796,7 @@ static int tc9562_pci_probe(struct pci_dev *pdev,
 	char version_str[32];
 	tc9562_version_t *fw_version;
 	int reg;
+	uint8_t SgmSigPol = 1; /* To handle SGM_SIG_DET */
 	
 	DBGPR_FUNC("-->tc9562_pci_probe\n");
 	
@@ -881,10 +904,18 @@ static int tc9562_pci_probe(struct pci_dev *pdev,
 
 	if (ENABLE_SGMII_INTERFACE == INTERFACE_SELECTED)
 	{
-    // SGMII interface
-		ret = readl(res.addr + 0x1524);
-		ret = (ret & ~0x00f00000) | 0x00200000;
-		writel(ret, res.addr + 0x1524);	
+    	if(1 == ENABLE_SGM_SIG_DET){
+			ret = readl(res.addr + 0x1524);
+			ret = (ret & ~0x00f00000) | 0x00200000;
+			writel(ret, res.addr + 0x1524);
+			
+			SgmSigPol = 0; /* Active High */
+		}else if(2 == ENABLE_SGM_SIG_DET){
+		    ret = readl(res.addr + 0x1524);
+		    ret = (ret & ~0x00f00000) | 0x00200000;
+		    writel(ret, res.addr + 0x1524);	
+			SgmSigPol = 1; /* Active low */
+		}
 	}
 
 	/* Interface configuration */
@@ -896,6 +927,10 @@ static int tc9562_pci_probe(struct pci_dev *pdev,
 		ret |= 0x8;		
  	else if(ENABLE_SGMII_INTERFACE == INTERFACE_SELECTED)
 		ret |= 0x10;
+	ret &= ~(0x00000800); /* Mask Polarity */
+	if(1 == SgmSigPol){
+		ret |= 0x00000800; /* Set Active low */
+	}
 
     writel(ret, res.addr + 0x0010);
 

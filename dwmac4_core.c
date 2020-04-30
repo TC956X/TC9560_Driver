@@ -4,7 +4,7 @@
  * dwmac4_core.c
  *
  * Copyright (C) 2015 STMicroelectronics Ltd
- * Copyright (C) 2019 Toshiba Electronic Devices & Storage Corporation
+ * Copyright (C) 2020 Toshiba Electronic Devices & Storage Corporation
  *
  * This file has been derived from the STMicro Linux driver,
  * and developed or modified for TC9562.
@@ -25,6 +25,9 @@
  */
 
 /*! History:
+ *  26 Feb 2020 : 1. Added 4.19 kernel support.
+                  2. Added TC - FRP feature support. 
+ *  VERSION     : 01-01
  *  30 Sep 2019 : Base lined
  *  VERSION     : 01-00
  */
@@ -371,7 +374,7 @@ static void dwmac4_config_cbs(struct mac_device_info *hw,
 	u32 value;
 
 	DBGPR_FUNC("-->dwmac4_config_cbs\n");
-
+	//printk("dwmac4_config_cbs : idle_slope : %x , send_slope : %x, high_credit : %x, low_credit : %x\n", idle_slope, send_slope, high_credit, low_credit);
 	/* enable AV algorithm */
 	value = readl(ioaddr + MTL_ETSX_CTRL_BASE_ADDR(queue));
 	value |= MTL_ETS_CTRL_AVALG;
@@ -827,6 +830,7 @@ static int dwmac4_irq_status(struct mac_device_info *hw,
 {
 	void __iomem *ioaddr = hw->pcsr;
 	u32 intr_status;
+	u32 intr_enable = readl(ioaddr + GMAC_INT_EN); 
 	int ret = 0;
 #ifdef VERIFY_PPO_USING_AUX
 	int val = 0;
@@ -835,6 +839,7 @@ static int dwmac4_irq_status(struct mac_device_info *hw,
 	DBGPR_FUNC("-->dwmac4_irq_status\n");
 
 	intr_status = readl(ioaddr + GMAC_INT_STATUS);
+	intr_status &= intr_enable; 
 #ifdef VERIFY_PPO_USING_AUX
 		{
 			#define TS_STATUS_AUXTSTRIG_BIT			2
@@ -1149,6 +1154,9 @@ static const struct tc9562mac_ops dwmac510_ops = {
 	.safety_feat_set = dwmac5_safety_feat_set,
 #endif /* TC9562_UNSUPPORTED_UNTESTED_FEATURE */
 	.rx_parser_init = dwmac5_rx_parser_init,
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(4,19,15))
+	.rx_config = dwmac5_rxp_config,
+#endif
 #ifdef TC9562_UNSUPPORTED_UNTESTED_FEATURE		
 	.pps_init = dwmac5_pps_init,
 	.mcgr_init = dwmac5_mcgr_init,

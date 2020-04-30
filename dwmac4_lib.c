@@ -4,7 +4,7 @@
  * dwmac4_lib.c
  *
  * Copyright (C) 2007-2015 STMicroelectronics Ltd
- * Copyright (C) 2019 Toshiba Electronic Devices & Storage Corporation
+ * Copyright (C) 2020 Toshiba Electronic Devices & Storage Corporation
  *
  * This file has been derived from the STMicro Linux driver,
  * and developed or modified for TC9562.
@@ -25,6 +25,8 @@
  */
 
 /*! History:
+ *  26 Feb 2020 : Added Unified Firmware feature.
+ *  VERSION     : 01-01
  *  30 Sep 2019 : Base lined
  *  VERSION     : 01-00
  */
@@ -84,10 +86,11 @@ void dwmac4_dma_start_tx(void __iomem *ioaddr, u32 chan)
 
 	value |= DMA_CONTROL_ST;
 	writel(value, ioaddr + DMA_CHAN_TX_CONTROL(chan));
-
+#ifndef UNIFIED_DRIVER
 	value = readl(ioaddr + GMAC_CONFIG);
 	value |= GMAC_CONFIG_TE;
 	writel(value, ioaddr + GMAC_CONFIG);
+#endif
 	DBGPR_FUNC("<--dwmac4_dma_start_tx\n");
 }
 
@@ -115,9 +118,11 @@ void dwmac4_dma_start_rx(void __iomem *ioaddr, u32 chan)
 
 	writel(value, ioaddr + DMA_CHAN_RX_CONTROL(chan));
 
+#ifndef UNIFIED_DRIVER
 	value = readl(ioaddr + GMAC_CONFIG);
 	value |= GMAC_CONFIG_RE;
 	writel(value, ioaddr + GMAC_CONFIG);
+#endif
 	DBGPR_FUNC("<--dwmac4_dma_start_rx\n");
 }
 
@@ -181,6 +186,9 @@ int dwmac4_dma_interrupt(void __iomem *ioaddr,
 {
 	int ret = 0;
 	u32 intr_status = 0;
+#ifdef UNIFIED_DRIVER
+	u32 data;
+#endif
 
 	DBGPR_FUNC("-->dwmac4_dma_interrupt\n");
 	intr_status = readl(ioaddr + DMA_CHAN_STATUS(chan));
@@ -206,6 +214,7 @@ int dwmac4_dma_interrupt(void __iomem *ioaddr,
 	}
 
 		x->normal_irq_n++;
+#ifndef UNIFIED_DRIVER
 		if (likely(intr_status & DMA_CHAN_STATUS_RI)) {
 			u32 value;
 			
@@ -232,7 +241,51 @@ int dwmac4_dma_interrupt(void __iomem *ioaddr,
 	 */
 	writel((intr_status & 0x3fffc7),
 	       ioaddr + DMA_CHAN_STATUS(chan));
+#else
 
+	if(chan != 3) {
+		if (likely(intr_status & DMA_CHAN_STATUS_RI)) {
+			u32 value;
+			
+			value = readl(ioaddr + DMA_CHAN_INTR_ENA(chan));
+			/* to schedule NAPI on real RIE event. */
+			if (likely(value & DMA_CHAN_INTR_ENA_RIE)) {
+				#ifdef UNIFIED_DRIVER_TEST_DBG2
+				DBGPR_UNIFIED_1("RX -  Ch%d", chan);
+				#endif
+				x->rx_normal_irq_n++;
+				ret |= handle_rx;
+				DBGPR_TEST("RIE %d \n",chan);
+			}
+		}
+	}
+	if (likely(intr_status & DMA_CHAN_STATUS_TI)) {
+		#ifdef UNIFIED_DRIVER_TEST_DBG2
+		DBGPR_UNIFIED_1("TX -  Ch%d", chan);
+		#endif
+		x->tx_normal_irq_n++;
+		ret |= handle_tx;
+			DBGPR_TEST("TI %d\n",chan);
+	}
+	if (unlikely(intr_status & DMA_CHAN_STATUS_ERI))
+	{
+		x->rx_early_irq++;
+	}
+
+/* Clear the interrupt by writing a logic 1 to the chanX interrupt
+ * status [21-0] expect reserved bits [5-3]
+ */
+
+	 data = 0x3fffc7;  
+	 if(chan == 3) {
+		 data = data & (~0xBC0);
+	 }
+
+
+	writel((intr_status & data),
+	   ioaddr + DMA_CHAN_STATUS(chan));
+
+#endif
 	DBGPR_FUNC("<--dwmac4_dma_interrupt\n");
 
 	return ret;
@@ -265,7 +318,12 @@ void tc9562mac_dwmac4_set_mac_addr(void __iomem *ioaddr, u8 addr[6],
 		data |= GMAC_HI_REG_DCS2;
 	else if (dcs == 3)
 		data |= GMAC_HI_REG_DCS3;
-
+#ifdef UNIFIED_DRIVER
+	if(reg_n == 3){
+		data &= ~(GMAC_HI_REG_MBC_MASK);
+		data |= 0x1F000000;
+	}
+#endif
 	writel(data, ioaddr + high);
 #else
 	data |= (TC9562MAC_CHAN0 << GMAC_HI_DCS_SHIFT);
@@ -282,6 +340,7 @@ void tc9562mac_dwmac4_set_mac_addr(void __iomem *ioaddr, u8 addr[6],
 /* Enable disable MAC RX/TX */
 void tc9562mac_dwmac4_set_mac(void __iomem *ioaddr, bool enable)
 {
+#ifndef UNIFIED_DRIVER
 	u32 value = readl(ioaddr + GMAC_CONFIG);
 
 	DBGPR_FUNC("-->tc9562mac_dwmac4_set_mac\n");
@@ -292,7 +351,7 @@ void tc9562mac_dwmac4_set_mac(void __iomem *ioaddr, bool enable)
 		value &= ~(GMAC_CONFIG_TE | GMAC_CONFIG_RE);
 
 	writel(value, ioaddr + GMAC_CONFIG);
-
+#endif
 	DBGPR_FUNC("<--tc9562mac_dwmac4_set_mac\n");
 	
 }

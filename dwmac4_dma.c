@@ -4,7 +4,7 @@
  * dwmac4_dma.c
  *
  * Copyright (C) 2015 STMicroelectronics Ltd
- * Copyright (C) 2019 Toshiba Electronic Devices & Storage Corporation
+ * Copyright (C) 2020 Toshiba Electronic Devices & Storage Corporation
  *
  * This file has been derived from the STMicro Linux driver,
  * and developed or modified for TC9562.
@@ -25,6 +25,10 @@
  */
 
 /*! History:
+ *  26 Feb 2020 : 1. Added TC - FRP feature support.
+ *                2. Added Unified Firmware feature.
+                  3. Added TDM Start/Stop Support for Unified Design.
+ *  VERSION     : 01-01
  *  30 Sep 2019 : Base lined
  *  VERSION     : 01-00
  */
@@ -113,6 +117,9 @@ static void dwmac4_dma_init_rx_chan(void __iomem *ioaddr,
     value &=~DMA_BUS_MODE_RBSZ_MASK;
 	value = value | (rxpbl << DMA_BUS_MODE_RPBL_SHIFT);
     value = value | (dma_buf_sz << DMA_BUS_MODE_RBSZ_SHIFT);
+#ifdef UNIFIED_DRIVER
+    value = value | (0x80000000);
+#endif
 	writel(value, ioaddr + DMA_CHAN_RX_CONTROL(chan));
 	
 #ifdef TC9562_DEFINED	
@@ -622,7 +629,7 @@ static void dwmac4_get_hw_feature(void __iomem *ioaddr,
 		dma_cap->asp = (hw_cap & GMAC_HW_FEAT_ASP) >> 28;
 		dma_cap->frpsel = (hw_cap & GMAC_HW_FEAT_FRPSEL) >> 10;
 		dma_cap->frpes = (hw_cap & GMAC_HW_FEAT_FRPES) >> 13;
-
+		dma_cap->frpbs = (hw_cap & GMAC_HW_FEAT_FRPBS) >> 11; /* This variable is used by TC and FRP feature */
 		/* Recalculate real values for frpes */
 		switch (dma_cap->frpes) {
 		default:

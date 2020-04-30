@@ -4,7 +4,7 @@
  * dwmac5.h
  *
  * Copyright (C) 2017 Synopsys, Inc. and/or its affiliates.
- * Copyright (C) 2019 Toshiba Electronic Devices & Storage Corporation
+ * Copyright (C) 2020 Toshiba Electronic Devices & Storage Corporation
  *
  * This file has been derived from the STMicro and Synopsys Linux driver,
  * and developed or modified for TC9562.
@@ -25,6 +25,8 @@
  */
 
 /*! History:
+ *  26 Feb 2020 : Added 4.19 kernel support.
+ *  VERSION     : 01-01
  *  30 Sep 2019 : Base lined
  *  VERSION     : 01-00
  */
@@ -212,4 +214,8 @@ int dwmac5_mcgr_init(struct net_device *ndev, struct mac_device_info *hw,
 void dwmac5_mcgr_intr(struct mac_device_info *hw,
 		struct tc9562mac_mcgr_cfg *cfg, int count);
 
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(4,19,15))
+int dwmac5_rxp_config(void *p, void *ent,
+		      unsigned int count);
+#endif
 #endif /* __DWMAC5_H__ */

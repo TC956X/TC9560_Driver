@@ -4,7 +4,7 @@
  * tc9562mac.h
  *
  * Copyright (C) 2007-2009 STMicroelectronics Ltd
- * Copyright (C) 2019 Toshiba Electronic Devices & Storage Corporation
+ * Copyright (C) 2020 Toshiba Electronic Devices & Storage Corporation
  *
  * This file has been derived from the STMicro Linux driver,
  * and developed or modified for TC9562.
@@ -25,6 +25,11 @@
  */
 
 /*! History:
+ *  26 Feb 2020 : 1. Added Unified Driver feature
+                  2. Added SGMII Interface slection macro.              
+                  3. Added 4.19 kernel support.
+                  4. Added TC - FRP feature support.                 
+ *  VERSION     : 01-01               
  *  30 Sep 2019 : Base lined
  *  VERSION     : 01-00
  */
@@ -33,7 +38,7 @@
 #define __TC9562MAC_H__
 
 #define TC9562_RESOURCE_NAME   "tc9562pci"
-#define DRV_MODULE_VERSION	"V_01-00"
+#define DRV_MODULE_VERSION	"V_01-01"
 
 #include <linux/clk.h>
 #include "tc9562mac_inc.h"
@@ -45,13 +50,15 @@
 #include <linux/reset.h>
 #include <linux/ctype.h>
 
+/* select 0(disbled), 1 (SGMII, Polarity high), 2 (SGMII , Polarity low) 
+If SGMII interface selected , should set either 1 or 2 */
+#define ENABLE_SGM_SIG_DET 0
 /* select any one of the following interface */
 #define ENABLE_RMII_INTERFACE               0
 #define ENABLE_RGMII_INTERFACE              1
 #define ENABLE_SGMII_INTERFACE		    	2
 
 #define INTERFACE_SELECTED                 ENABLE_RGMII_INTERFACE 
-//#define INTERFACE_SELECTED                 ENABLE_SGMII_INTERFACE  
 
 /* M3 debug address */
 #define M3_SRAM_FW_VER_OFFSET 0x4f900 /* DMEM addrs 0x2000F900 */
@@ -87,6 +94,9 @@ struct tc9562mac_tx_queue {
 	unsigned int dirty_tx;
 	dma_addr_t dma_tx_phy;
 	u32 tx_tail_addr;
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(4,19,15))
+	unsigned int launch_time;
+#endif
 };
 
 struct tc9562mac_rx_queue {
@@ -111,6 +121,63 @@ struct tc9562_cbs_params {
 	u32 low_credit;
 	u32 percentage;
 };
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(4,19,15))
+struct tc9562mac_tc_entry {
+	bool in_use;
+	bool in_hw;
+	bool is_last;
+	bool is_frag;
+	void *frag_ptr;
+	unsigned int table_pos;
+	u32 handle;
+	u32 prio;
+	struct {
+		u32 match_data;
+		u32 match_en;
+		u8 af:1;
+		u8 rf:1;
+		u8 im:1;
+		u8 nc:1;
+		u8 res1:4;
+		u8 frame_offset;
+		u8 ok_index;
+		u8 dma_ch_no;
+		u32 res2;
+	} __packed val;
+};
+#endif
+
+#define TDM_INPUT_MAX_STREAM 4
+
+typedef struct {
+  uint8_t  	  crf_op_mode; /* Talker/listener */
+  uint8_t         crf_stream_id[8];/* Only to be filled when acting as CRF Talker */
+  uint8_t         crf_dst_mac_address[6];/* Only to be filled when acting as CRF Talker */
+} CRF_CONFIGURATION;
+
+
+typedef struct {
+    uint8_t     samp_size; /* Sample Size 20bit not supported */
+    uint8_t         num_ch;
+    uint8_t         stream_id[8];
+    uint8_t         dst_mac_address[6];	
+    uint16_t        vlan_id :12;
+} TDM_MODE_CONFIGURATION;
+
+typedef struct {
+    uint8_t	     config;
+    uint8_t      samp_freq; /* Sampling Frequency */
+    uint8_t      op_mode;  /* Operating Mode can be TDM_OUT, TDM_IN_OUT, I2S_IN, I2S_OUT & I2S_IN_OUT. */
+    uint8_t                mcr_mode; /* MCR by FIFO or CRF or PPS or by PT*/
+	TDM_MODE_CONFIGURATION  in_conf[TDM_INPUT_MAX_STREAM]; /* Input Stream Specific Configuration */
+    TDM_MODE_CONFIGURATION  out_conf; /* Input Stream Specific Configuration */
+    CRF_CONFIGURATION		crf_conf;
+} TDM_I2S_CONF;
+
+typedef struct{
+    uint8_t link_state;
+    uint8_t link_speed;
+} TC9562_LINK;
 
 struct tc9562mac_priv {
 	/* Frequently used values are kept adjacent for cache effect */
@@ -235,6 +302,18 @@ struct tc9562mac_priv {
 	int cbs_cfg_status[6];
 	u32 mac_loopback_mode;
 	u32 phy_loopback_mode;
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(4,19,15))
+	unsigned int tc_entries_max;
+	unsigned int tc_off_max;
+	struct tc9562mac_tc_entry *tc_entries;//to be removed
+#endif
+
+#ifdef UNIFIED_DRIVER
+    uint8_t tdm_start;
+    TDM_I2S_CONF tdm_init_config;
+    TC9562_LINK link_param;
+#endif
+
 };
 
 enum tc9562mac_state {
@@ -259,8 +338,13 @@ int tc9562mac_tsn_link_configure(struct net_device *ndev, enum sr_class class,
 			      u16 framesize, u16 vid, u8 add_link, u8 pcp_hi,
 			      u8 pcp_lo);
 #endif
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(4,19,10))
+u16 tc9562mac_tsn_select_queue(struct net_device *netdev, struct sk_buff *skb,
+			    struct net_device *sb_dev, select_queue_fallback_t fallback);
+#else
 u16 tc9562mac_tsn_select_queue(struct net_device *netdev, struct sk_buff *skb,
 			    void *accel_priv, select_queue_fallback_t fallback);
+#endif
 int tc9562mac_mdio_unregister(struct net_device *ndev);
 int tc9562mac_mdio_register(struct net_device *ndev);
 int tc9562mac_mdio_reset(struct mii_bus *mii);

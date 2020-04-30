@@ -4,7 +4,7 @@
  * dwmac4.h
  *
  * Copyright (C) 2015 STMicroelectronics Ltd
- * Copyright (C) 2019 Toshiba Electronic Devices & Storage Corporation
+ * Copyright (C) 2020 Toshiba Electronic Devices & Storage Corporation
  *
  * This file has been derived from the STMicro Linux driver,
  * and developed or modified for TC9562.
@@ -25,6 +25,8 @@
  */
 
 /*! History:
+ *  26 Feb 2020 : Added TC - FRP feature support.
+ *  VERSION     : 01-01
  *  30 Sep 2019 : Base lined
  *  VERSION     : 01-00
  */
@@ -280,6 +282,7 @@ enum power_event {
 #define GMAC_HW_FEAT_ESTDEP		GENMASK(19, 17)
 #define GMAC_HW_FEAT_ESTSEL		BIT(16)
 #define GMAC_HW_FEAT_FRPES		GENMASK(14, 13)
+#define GMAC_HW_FEAT_FRPBS		GENMASK(12, 11) //TC FRP uses 
 #define GMAC_HW_FEAT_FRPSEL		BIT(10)
 
 /* MAC FPE Control/Status bitmap */

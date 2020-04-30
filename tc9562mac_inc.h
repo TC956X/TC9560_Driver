@@ -4,7 +4,7 @@
  * tc9562mac_inc.h
  *
  * Copyright (C) 2009 STMicroelectronics Ltd
- * Copyright (C) 2019 Toshiba Electronic Devices & Storage Corporation
+ * Copyright (C) 2020 Toshiba Electronic Devices & Storage Corporation
  *
  * This file has been derived from the STMicro Linux driver,
  * and developed or modified for TC9562.
@@ -25,6 +25,8 @@
  */
 
 /*! History:
+ *  26 Feb 2020 : Added Unified Driver feature.
+ *  VERSION     : 01-01
  *  30 Sep 2019 : Base lined
  *  VERSION     : 01-00
  */
@@ -33,6 +35,31 @@
 #define __TC9562MAC_PLATFORM_DATA
 
 #include <linux/platform_device.h>
+
+//#define UNIFIED_DRIVER
+
+#ifdef UNIFIED_DRIVER
+#define HOST_GPTP_CHANNEL 2
+//#define DEBUG_UNIFIED
+
+//#define UNIFIED_DRIVER_TEST_DBG1
+//#define UNIFIED_DRIVER_TEST_DBG2
+
+#ifdef UNIFIED_DRIVER_TEST_DBG1
+#define DBGPR_UNIFIED_1(x...) printk(KERN_ALERT x)
+#else
+#define DBGPR_FUNC(x...) do { } while (0)
+#endif
+
+#ifdef UNIFIED_DRIVER_TEST_DBG2
+#define DBGPR_UNIFIED_2(x...) printk(KERN_ALERT x)
+#else
+#define DBGPR_FUNC(x...) do { } while (0)
+#endif
+
+#define DBGPR_UNIFIED_2(x...) printk(KERN_ALERT x)
+
+#endif
 
 //#define FPE	1   
 
@@ -268,5 +295,9 @@ struct plat_tc9562macenet_data {
 	struct tc9562mac_rx_parser_cfg rxp_cfg;
 	struct tc9562mac_pps_cfg pps_cfg[TC9562MAC_PPS_MAX_NUM];
 	struct tc9562mac_mcgr_cfg mcgr_cfg[TC9562MAC_PPS_MAX_NUM];
+#ifdef UNIFIED_DRIVER
+	u8 rx_dma_ch_for_host[MTL_MAX_RX_QUEUES];
+	u8 tx_dma_ch_for_host[MTL_MAX_RX_QUEUES];
+#endif
 };
 #endif

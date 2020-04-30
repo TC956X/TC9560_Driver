@@ -4,7 +4,7 @@
  * tc9562mac_tsn.c
  *
  * Copyright (C) 2017 Synopsys, Inc. and/or its affiliates.
- * Copyright (C) 2019 Toshiba Electronic Devices & Storage Corporation
+ * Copyright (C) 2020 Toshiba Electronic Devices & Storage Corporation
  *
  * This file has been derived from the STMicro and Synopsys Linux driver,
  * and developed or modified for TC9562.
@@ -25,6 +25,8 @@
  */
 
 /*! History:
+ *  26 Feb 2020 : Added 4.19 kernel support.
+ *  VERSION     : 01-01
  *  30 Sep 2019 : Base lined
  *  VERSION     : 01-00
  */
@@ -143,8 +145,13 @@ int tc9562mac_tsn_link_configure(struct net_device *ndev, enum sr_class class,
 }
 #endif
 
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(4,19,10))
+u16 tc9562mac_tsn_select_queue(struct net_device *ndev, struct sk_buff *skb,
+			     struct net_device *sb_dev, select_queue_fallback_t fallback)
+#else
 u16 tc9562mac_tsn_select_queue(struct net_device *ndev, struct sk_buff *skb,
 			    void *accel_priv, select_queue_fallback_t fallback)
+#endif
 {
 
 #ifndef TC9562_DEFINED

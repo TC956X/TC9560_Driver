@@ -15,7 +15,7 @@ tc9562_pcie_eth-y := tc9562mac_main.o tc9562mac_ethtool.o tc9562mac_mdio.o ring_
 	      dwmac100_core.o dwmac100_dma.o enh_desc.o norm_desc.o	\
 	      mmc_core.o tc9562mac_hwtstamp.o tc9562mac_ptp.o dwmac4_descs.o	\
 	      dwmac4_dma.o dwmac4_lib.o dwmac4_core.o tc9562mac_tsn.o \
-	      dwmac5.o tc9562_pci.o dwmac4_enh_desc.o
+	      dwmac5.o tc9562_pci.o dwmac4_enh_desc.o tc9562mac_tc.o
 all:
 	make -C /lib/modules/$(shell uname -r)/build M=$(PWD) modules
 
